@@ -110,3 +110,152 @@ The extraction flow that produces two kinds of records is operational logs gener
 # Archiving requirements
   - At the start of each month, the previous month's log and audit files are compressed into a single archive and the originals are moved out of the active directories. This keeps the active directories small and makes a year of audit history easy to locate.
   - Audit archives are verified as readable before the originals are removed.
+
+
+
+
+# 7. Extraction Acceptance and Handover Rules
+The conditions below determine whether the extracted data may proceed to the Transformation stage. Then the  decision is based on the results of the nine validation checks defined in Section 3, evaluated by the Prefect flow at the end of each extraction run, and recorded in the run's audit summary.
+
+Decision Rules
+| Overall Condition                         | Acceptance Decision | Pipeline Action                 |
+|-------------------------------------------|---------------------|---------------------------------|
+| All required tables PASS                  | APPROVED            | Proceed to Transformation       |
+| One or more non-critical WARNING          | MANUAL REVIEW       | Hold pipeline                   |
+| One or more critical FAIL                 | REJECTED            | Stop/retry/quarantine           |
+
+**1. Automatic Approval**
+
+**- Validation condition:** When every check returns PASS the source directory is reachable, all three expected batch files present and readable. Also, all required columns exist, recorded_by and stock_id non-null in every record, no duplicate records, row counts match the raw files, and all three domains extracted, the tasks completed within the configured 3 retries and the 30-minute execution timeout.
+
+**- Acceptance criteria:** All nine checks PASS in the validation summary for the run.
+**- Pipeline action:** The flow marks that run APPROVED and automatically passes to the extracted DataFrames, run metadata, and validation summary to the Transformation stage.
+
+**- Decision mode:** It is automatic, and no human approval required.
+
+**- Responsible person:** None, only the Prefect flow decides.
+
+**2. Manual Review**
+
+**- Validation condition:** The pipeline is completed, but a non-critical warning is raised, for example a record count that is valid but unusually low compared to recent runs, or the minor formatting inconsistencies in non-required columns that do not violate the schema.
+
+**- Acceptance criteria:** There no critical check has failed, but at least one check returns WARNING.
+
+**- Pipeline action:** The pipeline holds, then extracted data is staged but not handed over to Transformation until reviewed. The Owner is notified through the run log and audit summary.
+
+**- Decision mode:** Manual
+
+**- Responsible person:** The Owner or a designated Staff member with the Owner's approval that can review the warning, to confirm whether the data is acceptable, and approves the handover or escalates to rejection.
+
+**3. Rejection or Failure**
+
+**- Validation condition:** Any critical check fails of missing or unreadable batch files, missing required columns, null identifiers, duplicate records, row-count mismatch, a missing domain, or the task remaining Failed after 3 retries or exceeding the 30-minute timeout.
+
+**- Acceptance criteria:** One or more critical FAIL results of the dataset cannot proceed.
+
+**- Pipeline action:** The pipeline stops the handover. Then the transient errors are retried automatically up to 3 attempts per the pipeline configuration. Then the files that still fail are quarantined, moved from the landing directory to a rejected/ subdirectory so the next run does not reprocess them, and the failure is logged with the affected filenames for manual follow-up. The run is marked REJECTED, and the extraction is re-attempted for the same window once the source problem is corrected.
+
+**- Decision mode:** Automatic rejection at detection time of the manual decision on re-run timing.
+
+**- Responsible person:** The Owner decides when the source issue is fixed and the re-extraction is triggered.
+
+**4. Handover**
+
+**- Validation condition:** The run has reached APPROVED status (automatically, or via manual review approval).
+
+**- Acceptance criteria:**  The extraction output is complete for all three domains and its validation summary contains no unresolved FAIL.
+
+**- Pipeline action:** The following is passed to the Transformation stage: (1) the extracted in-memory pandas DataFrames for sales, inventory (stocks), and expenses, (2) run metadata: run timestamp, source filenames and their dates, and row counts per domain, and (3) the validation summary table with the result of each check. These are also written to the audit directory as the run's permanent record.
+
+**- Decision mode:** Automatic once approval status is reached.
+
+**- Responsible person:** None; the Prefect flow performs the handover and logs it.
+
+| Validation Summary       | Result                                      |
+|--------------------------|---------------------------------------------|
+| Stocks table validation  | PASS                                        |
+| Sales table validation   | PASS                                        |
+| Expenses table validation | PASS                                       |
+| User table validation    | Not applicable (excluded from the extraction) |
+| Overall Extraction      | APPROVED                                    |
+
+# 8. Common Extraction Problems and Mitigation
+
+The problems below are drawn from the documented design of the BlockFlow pipeline, its declared dependencies, Prefect orchestration configuration, and the characteristics of its source data. Each is documented with its description, possible cause, impact, and mitigation.
+
+**1. Missing Batch File in the Entry Directory**
+**- Problem description:** There one or more of the expected daily CSV batch files (stock updates, sales receipts, expense logs) is not present when the pipeline runs.
+
+**- Possible cause:** The pipeline metadata lists raw log files present in the entry directory as a dependency. This dependency is not met because staff have not yet exported or deposited the day's files.
+
+**- Impact on the extraction process:** The extraction cannot produce a complete dataset, so the run cannot proceed to the Transform and Load stages for the affected domain.
+
+**- Proposed solution or mitigation:** The Prefect flow detects the missing file, retries up to the configured 3 attempts, and if the file still does not appear, it marks the run as failed and logs the missing filename so the gap can be closed with a follow-up extraction.
+
+**2. Insufficient File Permissions or Inaccessible Database File**
+
+**- Problem description:** The extraction task cannot read the entry directory or cannot access the blockflow.db database file.
+
+**- Possible cause:** The pipeline metadata requires read/write local file permissions and an accessible blockflow.db file. These requirements are unmet because of changed file permissions, the database file being moved or locked, or the pipeline running under a different account.
+
+**- Impact on the extraction process:** The flow fails at startup before any data is read, so no run output is produced for that schedule.
+
+**- Proposed solution or mitigation:** Prefect state tracking and error catching surface the environment failure immediately with its logged cause, allowing the operator to restore the permission or file path so the scheduled run can be re-executed.
+
+**3. Schema Changes in the Exported Files**
+
+**- Problem description:** The batch file arrives with different column names or structures than the documented schema.
+
+**- Possible cause:**  A change in how the source files are generated or exported that was not reflected in the pipeline metadata.
+
+**- Impact on the extraction process:**  Downstream processing may fail or map columns incorrectly, corrupting the meaning of the stored data.
+
+**- Proposed solution or mitigation:**  The pipeline's validation step checks schema and foreign keys (recorded_by,stocks_id) before data is accepted. A structural mismatch stops the batch, and the schema documentation is updated in a controlled way before re-running.
+
+**4. Erroneous Values from Manual Data Entry**
+
+**- Problem description:** The raw records contain human input errors such as misspelled values, inconsistent formats, or blank fields.
+
+**- Possible cause:** The source data originates from manual record-keeping, which the study's background identifies as error-prone due to human input.
+
+**- Impact on the extraction process:** Passing erroneous values downstream would produce unreliable stock counts, sales totals, and forecasts.
+
+**- Proposed solution or mitigation:** The system applies real-time validation and error prompts during data entry so mistakes are corrected before saving. Any errors that still reach the pipeline are handled by the Transform stage's cleaning step (dropping duplicates, filling or removing nulls, standardizing formats), which is deliberately structured into the data pipeline workflow.
+
+**5. Duplicate Records in the Extracted Data**
+**- Problem description:** The same transaction appears more than once in the extracted data.
+
+**- Possible cause:** Repeated extraction of the same batch, since the pipeline may process a file more than once after a failed or re-run execution.
+
+**- Impact on the extraction process:** Duplicates would inflate sales totals and stock movements in the destination tables.
+
+**- Proposed solution or mitigation:** The Load stage executes INSERT/UPSERT transactions, so re-processing the same records updates rather than duplicates them, while the Transform stage additionally drops duplicate records.
+
+**6. Records with Missing Foreign Key Values**
+**- Problem description:** Extracted sales records lack an stocks reference or records lack a recorded_by user link.
+
+**- Possible cause:** The source entry or export omitted the field despite entry-time validation prompts.
+
+**- Impact on the extraction process:** Records without these foreign keys cannot satisfy the relational constraints validated by the pipeline and would break the links to users and inventory items.
+
+**- Proposed solution or mitigation:** The pipeline's validation of schema and foreign keys rejects affected records before loading, ensuring entries are corrected at the source and re-extracted.
+
+**7. Extraction Interruption or Timeout**
+
+**- Problem description:** The extraction flow stops mid-run or exceeds its execution limit.
+
+**- Possible cause:** Large or slow file reads and environmental interruptions during execution.
+
+**- Impact on the extraction process:** A partially completed run could leave the pipeline without a complete dataset while falsely appearing to have produced output.
+
+**- Proposed solution or mitigation:** Prefect handles error catching and automated retries (configured at 3 attempts) with an execution timeout of 30 minutes. Task states are tracked and logged so an incomplete run is visible and is never treated as a successful extraction.
+
+**8. Contended Writes to the SQLite Database**
+
+**- Problem description:** Simultaneous write operations compete while the pipeline loads extracted data.
+
+**- Possible cause:** SQLite is not designed for applications with heavy simultaneous write operations, as documented in the technology trade-offs.
+
+**- Impact on the extraction process:** Concurrent writes could slow the Load phase or cause lock contention during insertion.
+
+**- Proposed solution or mitigation:** The pipeline configuration limits execution to a maximum of one active run (Max Active Runs: 1), and the daily 12:00 AM schedule processes batches sequentially rather than continuously, minimizing write contention by design.
