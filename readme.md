@@ -137,8 +137,78 @@ The extraction flow that produces two kinds of records is operational logs gener
   - At the start of each month, the previous month's log and audit files are compressed into a single archive and the originals are moved out of the active directories. This keeps the active directories small and makes a year of audit history easy to locate.
   - Audit archives are verified as readable before the originals are removed.
 
+# 6. Extraction Data Contract and Naming Convention
+The data contract defines the exact structure every extracted batch must conform to before it enters the pipeline, and the naming rules that keep the pipeline's fields consistent from source files to the destination database. 
+## 1. Required Schema
 
+Table 1: Users
 
+| Column Name | Data Type | Key/Constraint |
+| ----------- | --------- | -------------- |
+| email       | VARCHAR   | Unique         |
+| password    | VARCHAR   | NOT NULL       |
+| role        | VARCHAR   | NOT NULL       |
+
+Table 2: Expenses
+
+| Column Name  | Data Type | Key/Constraint |
+| ------------ | --------- | -------------- |
+| category     | VARCHAR   | NOT NULL       |
+| description  | TEXT      | NOT NULL       |
+| amount       | DECIMAL   | NOT NULL       |
+| expense_date | DATETIME  | NOT NULL       |
+| recorded_by  | INTEGER   | FOREIGN KEY    |
+
+Table 3: Stocks
+
+| Column Name | Data Type | Key/Constraint |
+| ----------- | --------- | -------------- |
+| size        | VARCHAR   | NOT NULL       |
+| quantity    | INTEGER   | NOT NULL       |
+| unit        | VARCHAR   | NOT NULL       |
+| unit_price  | DECIMAL   | NOT NULL       |
+| updated_at  | DATETIME  | NOT NULL       |
+| recorded_by | INTEGER   | FOREIGN KEY    |
+
+Table 4: Sales
+
+| Column Name   | Data Type | Key/Constraint |
+| ------------- | --------- | -------------- |
+| customer_name | VARCHAR   | NOT NULL       |
+| phone_number  | VARCHAR   | NOT NULL       |
+| shop_name     | VARCHAR   | NOT NULL       |
+| quantity      | INTEGER   | NOT NULL       |
+| unit_price    | DECIMAL   | NOT NULL       |
+| total_amount  | DECIMAL   | DERIVED        |
+| sale_date     | DATETIME  | NOT NULL       |
+| recorded_by   | INTEGER   | FOREIGN KEY    |
+
+Required identifiers and constraints. Every extracted table carries its primary key (expenses_id, stock_id, sales_id) as a unique, non-null identifier. recorded_by is required and non-null in every record of all three tables, referencing users.user_id. stock_id is required and non-null in every Sales record, referencing stocks.stock_id. total_amount is a derived field, computed as quantity × unit_price, and is not accepted from the source file as an input value. 
+
+# 2. Naming Convention
+Column naming format: All column names use the snake_case, with lowercase letters and words separated by underscores, such as customer_name, phone_number, shop_name, unit_price, total_amount, sale_date, recorded_by, and updated_at.
+Abbreviations and naming consistency: Unclear abbreviations are not permitted, need to complete and understandable names are used whenever possible. A concept keeps one name across all tables: quantity means units of hollow blocks in both the Sales and Stocks tables, and date fields follow the schema's existing convention of _date for event dates (sale_date, expense_date) and _at for last-update timestamps (updated_at).
+Primary keys: The primary key of each table is named using the table name followed by _id, such as user_id, stock_id, sale_id, and expense_id.
+Foreign keys: A foreign key uses the same identifier name as the referenced primary key; for example, stock_id in the Sales table references stocks.stock_id in the Stocks table. One exception applies to role-based foreign keys, which are named for the role they record rather than the referenced table: recorded_by references users.user_id and identifies the user who recorded the transaction.
+
+# 3. Schema Consistency
+Unexpected changes to column names, data types, or required fields are handled as follows. Before any batch is accepted, the required-columns check compares each file's headers against the data contract in Section 1. A missing or renamed required column, or a changed data type on a required field, REJECTS the batch and the mismatch is logged. A deviation is allowed only when a justified mapping is defined and documented in the table below; undeclared deviations are never silently coerced.
+
+| Source Column | Standardized Column | Source Type | Target Type | Mapping Type |
+| ------------- | ------------------- | ----------- | ----------- | ------------ |
+| Customer Name | `customer_name`     | VARCHAR     | VARCHAR     | Rename       |
+| Phone Number  | `phone_number`      | VARCHAR     | VARCHAR     | Rename       |
+| Shop Name     | `shop_name`         | VARCHAR     | VARCHAR     | Rename       |
+| Quantity      | `quantity`          | INTEGER     | INTEGER     | Rename       |
+| Unit Price    | `unit_price`        | DECIMAL     | DECIMAL     | Rename       |
+| Total Amount  | `total_amount`      | DECIMAL     | DECIMAL     | Derived      |
+| Sale Date     | `sale_date`         | DATETIME    | DATETIME    | Rename       |
+| Recorded by   | `recorded_by`       | INTEGER     | INTEGER     | Rename       |
+| Updated At    | `updated_at`        | DATETIME    | DATETIME    | Rename       |
+| Category      | `category`          | VARCHAR     | VARCHAR     | Rename       |
+| Description   | `description`       | TEXT        | TEXT        | Rename       |
+| Amount        | `amount`            | DECIMAL     | DECIMAL     | Rename       |
+| Expense Date  | `expense_date`      | DATETIME    | DATETIME    | Rename       |
 
 # 7. Extraction Acceptance and Handover Rules
 The conditions below determine whether the extracted data may proceed to the Transformation stage. Then the  decision is based on the results of the nine validation checks defined in Section 3, evaluated by the Prefect flow at the end of each extraction run, and recorded in the run's audit summary.
