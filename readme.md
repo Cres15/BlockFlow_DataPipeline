@@ -26,6 +26,32 @@ Excluded data: The user account credentials are not extracted, since the users t
 The data extraction process is limited by the availability and quality of the daily raw CSV files. Some source data may contain missing values, duplicate records, or inconsistent date and number formats, which may require cleaning and checking before loading the data into the database. The extraction is also limited to the available operational data, including sales, stocks, and expense records. Some historical records may be incomplete because the business previously relied on manual logs and spreadsheets. The extraction process also depends on the defined database schema and relationships. Changes in field names, data types, or required fields may require adjustments to the extraction and transformation process. External information, such as competitor pricing and market costs, is outside the scope of the extraction.
 The extraction process assumes that the required daily raw CSV files are available in the designated folder and that the system has the necessary read and write permissions. It also assumes that the local SQLite database is accessible and that the required tables and relationships are already available. The process also assumes that the extracted data follows the required format and contains valid references for fields such as recorded_by and stocks_id. It is also assumed that the extracted data represents the actual operational records of Magalin Hollow Blocks Trading and is processed only for the intended BlockFlow system and reporting purposes. Only authorized business data related to the BlockFlow system is included in the extraction.
 
+# 2. Source Tables and Column Specification
+The BlockFlow ETL pipeline includes the operational data needed to process stock, sales, expenses, and user records. The source data comes from daily raw CSV operational files. The selected tables and columns are limited to the information required for the extraction, transformation, validation, and loading process. 
+Name: Users
+Purpose: The Users table stores the account information of the Owner/Admin and Staff who access and record data in the BlockFlow system.
+Important Columns: The important columns are email (TEXT), password (TEXT), and role (TEXT). The email is used as a unique identifier, while the role identifies the user's system access.
+Primary Key or Unique Identifier: The email serves as the unique identifier.
+Relevant Relationships: A user can record multiple sales transactions and expense entries through the recorded_by field.
+Reason for Inclusion: This table is included because user information and the recorded_by relationship are needed to identify which authorized user recorded the operational data.
+Name: Stocks
+Purpose: The Stocks table stores the current stock information of hollow blocks, which is needed for stock monitoring and stock updates.
+Important Columns: The important columns are size (TEXT), quantity (INTEGER), unit (TEXT), unit_price (DECIMAL), updated_at (DATETIME), and recorded_by (INTEGER).
+Primary Key or Unique Identifier: No explicit primary key is specified.
+Relevant Relationships: The recorded_by field is a foreign key that references the Users table. The schema also states that one stock item is referenced across multiple sales orders.
+Reason for Inclusion: This table is included because stock quantity and stock updates are part of the BlockFlow stock management process and are also related to sales transactions and available stock monitoring.
+Name: Expenses
+Purpose: The Expenses table stores the operational expenses recorded by the business, including expenses related to raw materials, maintenance, and other operating activities.
+Important Columns: The important columns are category (TEXT), description (TEXT), amount (TEXT), expense_date (DECIMAL), and recorded_by (INTEGER).
+Primary Key or Unique Identifier: No explicit primary key is specified.
+Relevant Relationships: The recorded_by field is a foreign key that references the Users table.
+Reason for Inclusion: This table is included because expense records are required for financial summaries, profit calculations, reports, and the business analytics features of BlockFlow.
+Name: Sales
+Purpose: The Sales table stores the daily sales transactions of Magalin Hollow Blocks Trading.
+Important Columns: The important columns are customer name (TEXT), phone_number (TEXT), shop_name (TEXT), quantity (INTEGER), unit_price (DECIMAL), total_amount (DECIMAL), sale_date (DATETIME), and recorded_by (INTEGER).
+Primary Key or Unique Identifier: No explicit primary key is specified. The total_amount is a derived field calculated from the quantity and unit price.
+Relevant Relationships: The recorded_by field references the Users table, while the Lab 2 schema states that sales transactions reference one stock item through inventory_id.
+Reason for Inclusion: This table is included because sales data is the main source for daily sales monitoring, sales analysis, forecasting, profit calculations, and AI-generated reports in BlockFlow 
 
 
 
