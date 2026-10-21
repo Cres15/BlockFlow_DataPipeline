@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+
+# Real business data and run output
+Pipeline/entry/*.csv
+Pipeline/entry/rejected/
+Pipeline/logs/
+Pipeline/audit/
+Pipeline/staging/
+Pipeline/archive/
+
+# Database
+*.db
+
+# Python
+__pycache__/
+*.pyc
