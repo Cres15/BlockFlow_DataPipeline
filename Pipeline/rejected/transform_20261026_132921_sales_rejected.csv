@@ -1,0 +1,3 @@
+customer_name,phone_number,shop_name,quantity,unit_price,sale_date,recorded_by,stock_id,rejection_reason
+Juan Dela Cruz,09171234567,JDC Hardware,abc,12.50,2026-10-20 09:30:00,2,1,invalid quantity
+Maria Santos,09181234567,Santos Builders,abc,16.00,2026-10-20 10:15:00,2,2,invalid quantity

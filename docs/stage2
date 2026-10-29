@@ -1,0 +1,97 @@
+# Stage 2: Data Transformation Documentation
+
+## 1. Transformation Input and Processing Specification
+
+Transformation starts only after an APPROVED extraction run. It turns the three raw DataFrames into clean, correctly typed, load-ready tables for `blockflow.db`.
+
+**Input:** Transform receives three things from the Extraction stage:
+
+- The in-memory pandas DataFrames for stocks, sales, and expenses.
+- The run metadata: run ID, timestamps, source filenames, extraction window, and row counts per domain.
+- The validation summary table with the result of each extraction check.
+
+**State of the input:** Extraction has already renamed headers to `snake_case`, kept only the previous calendar day's records, and removed the source `total_amount`. All values still arrive as text, so Transform owns every type conversion.
+
+**Processing method:** Transform is a Python script using pandas, wrapped as a Prefect `@task` inside the same `@flow` as extraction. Prefect handles task tracking, retries, and execution logging.
+
+**Trigger and limits:** There is no separate schedule. Transform runs immediately after the run reaches APPROVED, or after the Owner approves a MANUAL REVIEW hold. It keeps the pipeline limits of one active run, 3 retries on transient errors, and a 30-minute execution timeout.
+
+**Output:** On success, Transform hands the transformed DataFrames, the transformation metadata, and its validation summary to the Load stage, and writes the same records to the audit directory.
+
+**Scope:**
+
+- **In scope:** data cleaning, standardization, derived fields, transformation validation, metadata and logs.
+- **Out of scope:** reading the CSV files (Extraction), writing to `blockflow.db` with `INSERT`/`UPSERT` (Load), the Users table, and external data such as competitor pricing.
+
+## 2. Data Profiling and Issue Identification
+
+Profiling measures what is wrong with the batch before anything is changed, so every cleaning action in Section 3 traces back to a counted issue. The expected issues come from the Stage 1 source limitations: manual record-keeping produces missing values, duplicates, and inconsistent date, number, and text formats.
+
+| Issue | Tables | How profiling detects it |
+| --- | --- | --- |
+| Duplicate Records | Stocks, Sales, Expenses | Rows repeated on the identifying key, or identical across all columns |
+| Null or Blanks Value | Stocks, Sales, Expenses | Count of null, empty, or whitespace-only values per required column |
+| Mixed date formats | `updated_at`, `sale_data`, `expenses_date` | Values that do not parse to one date-time format |
+| Badly formatted numbers | `quantity`, `unit_price`, `expenses_date` | Values that fail numeric parsing, such as thousands separators, currency symbols, or unit text |
+| Impossible values | `quantity`, `unit_price`, `amount` | Quantity that is not a whole number above zero; price or amount at or below zero |
+| Inconsistent text | `size`, `unit`, `category`, `shop_name`, `customer_name` | Leading or trailing spaces and casing variants of the same value |
+
+Profiling also records the row count per table, so Section 7 can confirm that every row is accounted for after cleaning. The counts per issue and table are written to the run's audit summary.
+
+## 3. Data Cleaning Rules
+
+Cleaning repairs or removes bad records in a fixed order, and no row disappears silently: every removed row is kept in the rejected area with its reason (Section 9).
+
+**Order of cleaning steps:**
+
+1. Text cleanup: trim spaces, collapse repeated spaces, and apply the casing in Section 4.
+2. Type conversion: convert each column to its target type (Section 4). A value that cannot convert becomes null.
+3. Null handling: fill or remove rows as the table below says.
+4. Impossible values: remove rows with a quantity that is not a whole number above zero, or a price or amount at or below zero.
+5. Duplicate removal: drop repeated records, keeping the first occurrence.
+
+**Null handling:** Money, dates, keys, and stock descriptions are never invented, so a null there removes the row. Free-text contact and description fields are filled with a placeholder so the row can still be recorded.
+
+| Action | Table | Columns |
+| --- | --- | --- |
+| Remove the row | Stocks | `size`, `quantity`, `unit`, `unit_price`, `updated_at`, `recorded_by` |
+| Remove the row | Sales | `quantity`, `unit_price`, `sales_date`, `recorded_by`, `stock_id` |
+| Remove the row | Expenses | `category`, `amount`, `expenses_date`, `recorded_by`, `stock_id` |
+| Fill with Unknown | Sales | `customer_name`, `shop_name`, `phone_number` |
+| Fill with No description | Expenses | `description` |
+
+**Duplicates:** Extraction already stops a batch whose identifying key repeats. Transform removes the remaining duplicates: records that match on every business column (everything except the `_id` column), which the key check cannot see because each copy carries a different ID. The number of rows dropped is written to the run metadata.
+
+## 4. Standardization and Data Type Rules
+
+Every column leaves Transform in the type and format the Stage 1 data contract names, because extraction passes everything on as text. A value that cannot be converted to its target type becomes null and is handled by the null rules in Section 3.
+
+| Target type | Columns | Standardization rule |
+| --- | --- | --- |
+| DATETIME | `updated_at`, `sales_date`, `expenses_date` | Parse mixed formats and write as `YYYY-MM-DD HH:MM:SS`. A date without a time becomes `00:00:00`. |
+| INTEGER | `quantity`, `recorded_by`, `stock_id` | Whole numbers only. `100.0` becomes `100`; `100.5` is not a whole number and becomes null. |
+| DECIMAL | `unit_price`, `amount`, `total_amount` | Remove thousands separators and currency symbols such as ₱ or PHP, then round half up to 2 decimal places. |
+| VARCHAR (codes) | `size`, `unit` | `size` in upper case (CHB-4); `unit` in lower case (pcs). |
+| VARCHAR (names) | `Customer_name`, `shope_name`, `category` | Title Case, so `juan DELA cruz` and `Juan Dela Cruz` match. |
+| VARCHAR (phone) | `phone_number` | Keep only digits and store as text, so a leading `0` is never lost. |
+| TEXT | `description` | Trimmed only; the original casing is kept. |
+
+Column names stay in `snake_case` exactly as the extraction contract defines them. Transform adds no new columns except the derived field in Section 5.
+
+## 5. Business Transformation Rules
+
+This stage defines one derived field: `total_amount` in the Sales table. The Stage 1 data contract marks it DERIVED and forbids accepting it from the source file, so Transform is the only place it is created.
+
+`Total_amount = quantity x unit_price`
+
+- It is computed after cleaning and type conversion, so it only uses valid whole-number quantities and 2-decimal prices.
+- The calculation uses exact decimal arithmetic, not floating point, and the result is rounded half up to 2 decimal places.
+- If a source file still contains a `total_amount` column, it was already dropped at extraction and is never compared or reused.
+
+| Customer | Quantity | `unit_price` | `total_amount` |
+| --- | ---: | ---: | ---: |
+| Juan Dela Cruz | 100 | 12.50 | 1250.00 |
+| Maria Santos | 50 | 16.00 | 800.00 |
+| Pedro Reyes | 30 | 22.00 | 660.00 |
+
+Any further derived field, such as daily totals or profit, would be added to this section before it is built.

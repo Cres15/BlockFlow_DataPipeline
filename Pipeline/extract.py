@@ -35,6 +35,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ENTRY_DIR = BASE_DIR / "entry"          # raw daily CSV batch files land here
 REJECTED_DIR = ENTRY_DIR / "rejected"   # quarantined files
 STAGING_DIR = BASE_DIR / "staging"      # MANUAL REVIEW holding area
+ROW_REJECTED_DIR = BASE_DIR / "rejected"  # rows removed by the Transform stage
 LOGS_DIR = BASE_DIR / "logs"            # one plain-text log per run
 AUDIT_DIR = BASE_DIR / "audit"          # one JSON summary per run
 
@@ -379,7 +380,11 @@ def archive_previous_month(today: date | None = None) -> Path | None:
     today = today or date.today()
     prev = (today.replace(day=1) - timedelta(days=1))
     tag = f"{prev:%Y%m}"
-    members = [*LOGS_DIR.glob(f"run_{tag}*"), *AUDIT_DIR.glob(f"run_{tag}*")]
+    members = [
+        *LOGS_DIR.glob(f"run_{tag}*"), *AUDIT_DIR.glob(f"run_{tag}*"),
+        *LOGS_DIR.glob(f"transform_{tag}*"), *AUDIT_DIR.glob(f"transform_{tag}*"),
+        *ROW_REJECTED_DIR.glob(f"transform_{tag}*"),
+    ]
     if not members:
         return None
     archive_dir = BASE_DIR / "archive"
