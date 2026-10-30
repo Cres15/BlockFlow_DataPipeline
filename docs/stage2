@@ -1,97 +1,230 @@
-# Stage 2: Data Transformation Documentation
-
 ## 1. Transformation Input and Processing Specification
 
-Transformation starts only after an APPROVED extraction run. It turns the three raw DataFrames into clean, correctly typed, load-ready tables for `blockflow.db`.
+### 1.1 Input Source
 
-**Input:** Transform receives three things from the Extraction stage:
+This stage receives the **approved extraction handover**. It does not read the source CSV files and does not re-extract. The source system and the extraction contract are described in the Stage 1 documentation and are not repeated here.
 
-- The in-memory pandas DataFrames for stocks, sales, and expenses.
-- The run metadata: run ID, timestamps, source filenames, extraction window, and row counts per domain.
-- The validation summary table with the result of each extraction check.
+| Item | Description |
+|---|---|
+| Input name | Approved extraction handover package (Stage 1 output) |
+| Contents | (1) DataFrames `stocks`, `sales`, `expenses`; (2) extraction run metadata (run ID, timestamps, source filenames, extraction window, row counts per domain); (3) extraction validation summary |
+| Format | pandas DataFrames passed in memory by Prefect inside the same `@flow`. Every column is text (`string`). |
+| Persisted copy | On APPROVED, Extraction also writes the handover to `staging/<parent_run_id>/` as UTF-8 CSV (`stocks.csv`, `sales.csv`, `expenses.csv`) plus `extraction_metadata.json` and `extraction_validation_summary.csv`. Transform reads this copy only when a batch is restarted (see 1.2). |
+| Extraction run ID | `parent_run_id`, e.g. `run_20261011_000000` |
+| Batch window | The previous calendar day, e.g. `2026-10-10 00:00:00` to `2026-10-10 23:59:59` (Asia/Manila) |
+| Entry condition | Extraction status is `APPROVED` (automatically, or after the Owner approved a MANUAL REVIEW hold) |
+| State of the input | Headers already in snake_case; only the batch window kept; source `total_amount` already removed; **all values still text**, so this stage owns every type conversion |
 
-**State of the input:** Extraction has already renamed headers to `snake_case`, kept only the previous calendar day's records, and removed the source `total_amount`. All values still arrive as text, so Transform owns every type conversion.
+**Example.** Extraction run `run_20261011_000000` stages the records of 2026-10-10 for `stocks`, `sales`, and `expenses`. Stage 2 receives them, profiles them, applies the cleaning, standardization, and business rules, validates the result, and hands the transformed tables to Load as batch `BATCH_20261010` under transformation run `TRN_20261011_000000`.
 
-**Processing method:** Transform is a Python script using pandas, wrapped as a Prefect `@task` inside the same `@flow` as extraction. Prefect handles task tracking, retries, and execution logging.
+### 1.2 Batch Processing Method
 
-**Trigger and limits:** There is no separate schedule. Transform runs immediately after the run reaches APPROVED, or after the Owner approves a MANUAL REVIEW hold. It keeps the pipeline limits of one active run, 3 retries on transient errors, and a 30-minute execution timeout.
+| Item | Description |
+|---|---|
+| Technology | Python 3 with pandas; one Prefect `@task` (`transform_batch`) inside the extraction `@flow` |
+| Schedule | No separate schedule. Runs immediately after extraction, which runs **daily at 00:00 (Asia/Manila)**. |
+| Batch window / size | All records in the handover for the previous calendar day. Daily volume is small, so the whole batch is processed in memory. |
+| Batch ID | `BATCH_<YYYYMMDD of the window date>`, e.g. `BATCH_20261010`. It stays the same on every rerun of that window. |
+| Run ID | `TRN_<YYYYMMDD_HHMMSS of the start>`; a new run ID is created on every attempt. |
+| Limits | One active run, 3 retries on transient errors, 30-minute timeout |
+| Output | Transformed DataFrames, transformation metadata, and validation summary passed to Load. Row data is written to `staging/transformed/<batch_id>/`; metadata and validation results to `audit/`. |
 
-**Output:** On success, Transform hands the transformed DataFrames, the transformation metadata, and its validation summary to the Load stage, and writes the same records to the audit directory.
+**Failed batch restart**
 
-**Scope:**
+1. **Transient error** (file lock, `blockflow.db` lookup temporarily unavailable): Prefect retries the task up to 3 times. Each retry restarts from the beginning of `transform_batch` using the same input.
+2. **Task failed or timed out after retries:** the run is marked `REJECTED`, nothing is handed to Load, and the error code is logged. After the cause is fixed, the Owner starts the flow in *transform-only* mode with the `parent_run_id`. Transform then reads the persisted copy in `staging/<parent_run_id>/`. Extraction is **not** run again.
+3. **Source data problem** (e.g. many rejected rows): the Owner corrects the source file and re-runs the whole window from Extraction, which creates a new extraction run and a new handover.
 
-- **In scope:** data cleaning, standardization, derived fields, transformation validation, metadata and logs.
-- **Out of scope:** reading the CSV files (Extraction), writing to `blockflow.db` with `INSERT`/`UPSERT` (Load), the Users table, and external data such as competitor pricing.
+**Idempotency: yes.** Transform is a pure function of its input and the versioned rules. It keeps no state between runs. Running the same batch twice gives the same transformed rows. Outputs are written per `batch_id`: a rerun **replaces** the files in `staging/transformed/<batch_id>/`, `rejected/` (same batch ID), and the audit summary for that batch. It never appends to them, so no duplicates are created. Stage 3 must load with an upsert on the primary key so that a rerun does not duplicate rows in `blockflow.db`.
+
+### 1.3 Transformation Scope
+
+| Table | Cleaned | Standardized | Derived | Aggregated |
+|---|---|---|---|---|
+| `stocks` | all columns (C-01 to C-10) | `stock_id`, `size`, `quantity`, `unit`, `unit_price`, `updated_at`, `recorded_by` | none | none |
+| `sales` | all columns (C-01 to C-10) | `sale_id`, `customer_name`, `phone_number`, `shop_name`, `quantity`, `unit_price`, `sale_date`, `recorded_by`, `stock_id` | `total_amount` (B-01) | none |
+| `expenses` | all columns (C-01 to C-10) | `expense_id`, `category`, `description`, `amount`, `expense_date`, `recorded_by` | none | none |
+
+**Out of scope:** reading CSV files (Extraction), writing to `blockflow.db` (Load), the `users` table, external data such as competitor pricing, and loading, indexing, or performance tuning.
+
+### 1.4 Dependencies and Assumptions
+
+**Processing order**
+
+| Order | Table | Why |
+|---|---|---|
+| 0 | Reference data (read-only): `users.user_id` list and existing `stocks.stock_id` list from `blockflow.db`; `config/reference_values.csv` | Needed for orphan checks (C-08) and code mapping (S-06, S-07) |
+| 1 | `stocks` | `sales.stock_id` refers to it; stocks received in the same batch count as valid parents |
+| 2 | `sales` | Depends on cleaned `stocks` |
+| 3 | `expenses` | Independent of the other tables |
+
+**Assumptions**
+
+| ID | Assumption | If it does not hold |
+|---|---|---|
+| A-01 | Extraction writes the persisted copy (1.1) | Restart is impossible; update Stage 1 |
+| A-02 | Times are local (Asia/Manila), no conversion | Wrong time stored |
+| A-03 | Transform only reads key lists from `blockflow.db`; `users` is not transformed | Run stops (`TRF-E03`) |
+| A-04 | Owner maintains `config/reference_values.csv` | Run stops (V-01) |
+| A-05 | Late records belong to an already processed window | Owner re-runs that date |
+| A-06 | `sales_id` and `expenses_id` are accepted as aliases (S-10) | V-02 fails |
+| A-07 | Load upserts on the primary key | Reruns could duplicate rows |
+| A-08 | Thresholds and reference lists are initial values | Owner confirms; a change is a new rules version |
+
+---
 
 ## 2. Data Profiling and Issue Identification
 
-Profiling measures what is wrong with the batch before anything is changed, so every cleaning action in Section 3 traces back to a counted issue. The expected issues come from the Stage 1 source limitations: manual record-keeping produces missing values, duplicates, and inconsistent date, number, and text formats.
+Profiling runs first (`profile_batch`) on the handover **before any change**. It measures what is wrong in the batch, so every rule in Sections 3 to 5 traces back to a counted issue. For each run it records the row count per table and the null, blank, duplicate, unparseable, and out-of-range counts per column, and writes them to `audit/profile_<run_id>.json`.
 
-| Issue | Tables | How profiling detects it |
-| --- | --- | --- |
-| Duplicate Records | Stocks, Sales, Expenses | Rows repeated on the identifying key, or identical across all columns |
-| Null or Blanks Value | Stocks, Sales, Expenses | Count of null, empty, or whitespace-only values per required column |
-| Mixed date formats | `updated_at`, `sale_data`, `expenses_date` | Values that do not parse to one date-time format |
-| Badly formatted numbers | `quantity`, `unit_price`, `expenses_date` | Values that fail numeric parsing, such as thousands separators, currency symbols, or unit text |
-| Impossible values | `quantity`, `unit_price`, `amount` | Quantity that is not a whole number above zero; price or amount at or below zero |
-| Inconsistent text | `size`, `unit`, `category`, `shop_name`, `customer_name` | Leading or trailing spaces and casing variants of the same value |
+> **Note on counts.** The figures below are baseline **estimates (marked \*)** expected from manual record-keeping. Replace them with the measured values from the first profiling run. The issue types, examples, and treatments are the design; the percentages are placeholders.
 
-Profiling also records the row count per table, so Section 7 can confirm that every row is accounted for after cleaning. The counts per issue and table are written to the run's audit summary.
+| Table | Column | Issue type | Example | Affected records | Planned treatment |
+|---|---|---|---|---|---|
+| stocks | `size` | Inconsistent format / case | `chb-4`, `CHB4`, ` CHB-4 ` | ~6%\* | Trim, upper case, pattern (C-01, S-05) |
+| stocks | `unit` | Inconsistent codes | `Pcs`, `pieces`, `PC` | ~8%\* | Map to `pcs` (S-06) |
+| stocks | `quantity` | Badly formatted numbers | `1,200`, `500 pcs`, `100.0` | ~4%\* | Strip separators and unit text, convert (S-02) |
+| stocks | `quantity` | Invalid values | `0`, `-20`, `100.5` | ~1%\* | Reject and log (C-03, C-06) |
+| stocks | `unit_price` | Currency symbols / separators | `₱12.50`, `PHP 1,250.00` | ~5%\* | Strip, DECIMAL(10,2) (S-04) |
+| stocks | `unit_price` | Invalid values | `0`, `-15.00` | ~0.5%\* | Reject and log (C-06) |
+| stocks | `updated_at` | Mixed date formats | `10/10/2026`, `2026-10-10`, `Oct 10, 2026 2:30 PM` | ~10%\* | Standardize (S-01) |
+| stocks | `recorded_by` | Missing or unknown user | `""`, `99` | ~1%\* | Reject and log (C-03, C-08) |
+| stocks | all business columns | Duplicates with different `stock_id` | same row keyed twice | ~1%\* | Keep lowest ID (C-09) |
+| sales | `customer_name`, `shop_name` | Casing and extra spaces | `juan DELA cruz`, ` Maria  Santos` | ~12%\* | Trim, Title Case (C-01, S-07) |
+| sales | `customer_name`, `shop_name`, `phone_number` | Missing values | `""`, `N/A` | ~7%\* | Fill `Unknown` (C-02, C-04) |
+| sales | `phone_number` | Mixed formats | `0917-123-4567`, `(0917) 1234567`, `+63 917 123 4567` | ~15%\* | Digits only (S-08) |
+| sales | `quantity`, `unit_price` | Badly formatted / invalid | `1,000`, `₱16.00`, `0`, `-5` | ~4%\* | S-02, S-04, C-06 |
+| sales | `sale_date` | Mixed date formats | `10/10/2026`, `2026-10-10 14:05`, `Oct 10, 2026` | ~10%\* | Standardize (S-01), window check (C-10) |
+| sales | `stock_id`, `recorded_by` | Orphan key | `999` (no such stock) | ~0.5%\* | Reject and log (C-08) |
+| sales | `quantity`, `unit_price` | Outliers | `100000` pcs | ~0.3%\* | Flag, keep, warn (C-07) |
+| sales | all business columns | Duplicates with different `sale_id` | same sale keyed twice | ~1%\* | Keep lowest ID (C-09) |
+| expenses | `category` | Casing / extra spaces | `FUEL`, `fuel ` | ~10%\* | Trim, Title Case (C-01, S-07) |
+| expenses | `description` | Missing values | `""` | ~20%\* | Fill `No description` (C-05) |
+| expenses | `amount` | Currency symbols / invalid | `₱1,500.00`, `-300` | ~5%\* | S-04, C-06 |
+| expenses | `expense_date` | Mixed date formats | `10/10/2026`, `2026-10-10` | ~10%\* | S-01, C-10 |
+| expenses | `amount` | Outliers | `1500000` | ~0.2%\* | Flag, keep, warn (C-07) |
+| all tables | `stock_id` / `sale_id` / `expense_id` | Missing primary key | `""` | ~0.5%\* | Reject and log (C-03) |
+
+---
 
 ## 3. Data Cleaning Rules
 
-Cleaning repairs or removes bad records in a fixed order, and no row disappears silently: every removed row is kept in the rejected area with its reason (Section 9).
+**No record is dropped silently.** Every rejected row is written to the rejected area with its `batch_id`, `rule_id`, and reason (Section 9) and is counted in the metadata (Section 8). A record that is cleaned and kept is *modified*, not rejected.
 
-**Order of cleaning steps:**
+### 3.1 Rules
 
-1. Text cleanup: trim spaces, collapse repeated spaces, and apply the casing in Section 4.
-2. Type conversion: convert each column to its target type (Section 4). A value that cannot convert becomes null.
-3. Null handling: fill or remove rows as the table below says.
-4. Impossible values: remove rows with a quantity that is not a whole number above zero, or a price or amount at or below zero.
-5. Duplicate removal: drop repeated records, keeping the first occurrence.
+| Rule ID | Target | Condition | Action | Justification |
+|---|---|---|---|---|
+| C-01 | All text columns | Extra spaces, control or zero-width characters | Trim, collapse spaces, remove characters | Avoids false mismatches |
+| C-02 | All columns | Empty, blank, or `N/A`, `NULL`, `NONE`, `-` | Convert to null | One definition of "missing" |
+| C-03 | Required columns (note 1) | Null after C-02 or failed conversion | **Reject** | Keys, money, and dates are never invented |
+| C-04 | `sales.customer_name`, `shop_name`, `phone_number` | Null | Fill `Unknown` | The sale is still valid |
+| C-05 | `expenses.description` | Null | Fill `No description` | The expense is still valid |
+| C-06 | `quantity`, `unit_price`, `amount` | Zero or negative | **Reject** | Invalid business value |
+| C-07 | `quantity`, `unit_price`, `amount` | Above the outlier limit (note 2) | Keep and flag | A person decides, not the pipeline |
+| C-08 | `recorded_by`, `sales.stock_id` | Key has no parent (note 3) | **Reject** | Prevents broken links |
+| C-09 | All three tables | Identical business columns after cleaning (note 4) | Keep lowest ID; log the rest as duplicates | The first entry is the original |
+| C-10 | `updated_at`, `sale_date`, `expense_date` | Parsed date outside the batch window | **Reject** | Catches day/month swaps |
 
-**Null handling:** Money, dates, keys, and stock descriptions are never invented, so a null there removes the row. Free-text contact and description fields are filled with a placeholder so the row can still be recorded.
+**Notes**
 
-| Action | Table | Columns |
-| --- | --- | --- |
-| Remove the row | Stocks | `size`, `quantity`, `unit`, `unit_price`, `updated_at`, `recorded_by` |
-| Remove the row | Sales | `quantity`, `unit_price`, `sales_date`, `recorded_by`, `stock_id` |
-| Remove the row | Expenses | `category`, `amount`, `expenses_date`, `recorded_by`, `stock_id` |
-| Fill with Unknown | Sales | `customer_name`, `shop_name`, `phone_number` |
-| Fill with No description | Expenses | `description` |
+1. **C-03 required columns:** all IDs and `recorded_by`; `sales.stock_id`; `stocks.size`, `quantity`, `unit`, `unit_price`, `updated_at`; `sales.quantity`, `unit_price`, `sale_date`; `expenses.category`, `amount`, `expense_date`. Reasons: `null_required` or `unparseable_value`.
+2. **C-07 limits (configurable):** `quantity` above 10,000; `unit_price` above 1,000.00; `amount` above 100,000.00. Checked by V-15.
+3. **C-08 parents:** `recorded_by` must be in `users.user_id`. `sales.stock_id` must be in existing `stocks.stock_id` or in the stocks of this batch.
+4. **C-09 comparison:** all columns except the `_id` column. Dropped rows go to the rejected area as `duplicate` and are counted as `duplicates_dropped`.
 
-**Duplicates:** Extraction already stops a batch whose identifying key repeats. Transform removes the remaining duplicates: records that match on every business column (everything except the `_id` column), which the key check cannot see because each copy carries a different ID. The number of rows dropped is written to the run metadata.
+### 3.2 Execution Order
+
+1. C-01 text cleanup, then C-02 null normalization
+2. Type conversion and standardization (S-01 to S-10); a failed conversion becomes null
+3. C-03 required-value rejects, then C-04 and C-05 fills
+4. C-06 invalid values, then C-10 window check
+5. C-08 orphan check (after `stocks` is cleaned, so same-batch stocks are valid parents)
+6. C-09 duplicate removal
+7. C-07 outlier flag
+8. B-01 derivation (Section 5)
+
+A row rejected at an earlier step is not processed by later steps and is counted once, under the first rule that rejected it.
+
+### 3.3 Required Considerations: Where Each Is Handled
+
+| Consideration | Rule(s) |
+|---|---|
+| Missing or null values (default, fill, or reject) | C-02, C-03 (reject), C-04, C-05 (fill) |
+| Duplicates and which record is kept | C-09 (lowest ID kept) |
+| Whitespace and invalid characters | C-01 |
+| Invalid, out-of-range values and outliers | C-06 (reject), C-07 (flag), C-10 |
+| Orphan records | C-08 |
+
+---
 
 ## 4. Standardization and Data Type Rules
 
-Every column leaves Transform in the type and format the Stage 1 data contract names, because extraction passes everything on as text. A value that cannot be converted to its target type becomes null and is handled by the null rules in Section 3.
+All values arrive as text. A value that cannot be converted becomes null and is then handled by C-03 (rejected with reason `unparseable_value`); it is never guessed.
 
-| Target type | Columns | Standardization rule |
-| --- | --- | --- |
-| DATETIME | `updated_at`, `sales_date`, `expenses_date` | Parse mixed formats and write as `YYYY-MM-DD HH:MM:SS`. A date without a time becomes `00:00:00`. |
-| INTEGER | `quantity`, `recorded_by`, `stock_id` | Whole numbers only. `100.0` becomes `100`; `100.5` is not a whole number and becomes null. |
-| DECIMAL | `unit_price`, `amount`, `total_amount` | Remove thousands separators and currency symbols such as ₱ or PHP, then round half up to 2 decimal places. |
-| VARCHAR (codes) | `size`, `unit` | `size` in upper case (CHB-4); `unit` in lower case (pcs). |
-| VARCHAR (names) | `Customer_name`, `shope_name`, `category` | Title Case, so `juan DELA cruz` and `Juan Dela Cruz` match. |
-| VARCHAR (phone) | `phone_number` | Keep only digits and store as text, so a leading `0` is never lost. |
-| TEXT | `description` | Trimmed only; the original casing is kept. |
+### 4.1 Data Types and Formats
 
-Column names stay in `snake_case` exactly as the extraction contract defines them. Transform adds no new columns except the derived field in Section 5.
+| Rule ID | Columns | Standard format / type | On failure |
+|---|---|---|---|
+| S-01 | `updated_at`, `sale_date`, `expense_date` | DATETIME `YYYY-MM-DD HH:MM:SS` | Reject (C-03) |
+| S-02 | `quantity` | INTEGER | Reject (C-03) |
+| S-03 | All IDs, `recorded_by`, `sales.stock_id` | INTEGER | Reject (C-03) |
+| S-04 | `unit_price`, `amount` | DECIMAL(10,2) and DECIMAL(12,2) | Reject (C-03) |
+| S-05 | `stocks.size` | Upper case `CHB-<number>` | Reject (`invalid_size_pattern`) |
+| S-06 | `stocks.unit` | Lower case, mapped (e.g. `pcs`) | Reject (`unmapped_unit`) |
+| S-07 | `customer_name`, `shop_name`, `category` | Title Case | Not applicable |
+| S-08 | `sales.phone_number` | Digits only, 7 to 15 digits | Set `Unknown` (C-04) |
+| S-09 | All text columns | Maximum length (Section 6) | Reject (`exceeds_length`) |
+| S-10 | `sales_id`, `expenses_id` | Renamed `sale_id`, `expense_id` | V-02 fails |
+| S-11 | `expenses.description` | Trimmed only, casing kept | Not applicable |
+
+**Conversion details**
+
+- **S-01 dates:** accepted source formats are `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS]`, `YYYY/MM/DD`, `MM/DD/YYYY [time]`, `DD/MM/YYYY` (only if the first part is above 12), and `Mon DD, YYYY [time]`. A date without a time becomes `00:00:00`. Time zone is Asia/Manila with no conversion.
+- **S-02 quantity:** remove thousands separators and the text `pcs` or `pc`. `100.0` becomes `100`; `100.5` is not whole and fails.
+- **S-04 prices:** remove `₱`, `PHP`, `Php`, `P`, spaces, and comma separators, then round half up to 2 decimals. A comma followed by 1 or 2 final digits (`12,50`) is not accepted.
+- **S-05 size:** `chb-4`, `CHB4`, and `CHB 4` all become `CHB-4`.
+- **S-07 names:** each word after a space or hyphen is capitalized, so `juan DELA cruz` becomes `Juan Dela Cruz`.
+- **S-08 phone:** stored as text so a leading `0` is kept. `0917-123-4567` becomes `09171234567`.
+
+**Date ambiguity (S-01).** A slash date with both parts 12 or below (e.g. `03/04/2026`) is read month-first. If that reading falls outside the batch window and the day-first reading falls inside it, the day-first reading is used and the row counts under S-01. If neither reading is inside the window, the row is rejected by C-10. Two-digit years are not accepted.
+
+**Numeric precision and rounding.** Exact decimal arithmetic (Python `Decimal`), never floating point. Rounding is half up (`ROUND_HALF_UP`) to 2 decimal places.
+
+**Currency.** All money is Philippine peso (PHP). The currency is implicit and no currency column is stored. Units of measure are `pcs` unless the reference table lists others. Country or region codes are not used.
+
+### 4.2 Reference Values (`config/reference_values.csv`)
+
+| Column | Source variants | Standard value |
+|---|---|---|
+| `unit` | `pcs`, `pc`, `pc.`, `pcs.`, `piece`, `pieces` (any casing) | `pcs` |
+| `category` | Owner-defined variants, e.g. a synonym list per category | Standard category in Title Case. A category that is not listed is **kept** in Title Case, not rejected. |
+
+The Owner maintains the file. Any change is a change of rules version (Section 8).
+
+---
 
 ## 5. Business Transformation Rules
 
-This stage defines one derived field: `total_amount` in the Sales table. The Stage 1 data contract marks it DERIVED and forbids accepting it from the source file, so Transform is the only place it is created.
+### 5.1 Derived Columns, Lookups, and Filters
 
-`Total_amount = quantity x unit_price`
+| Rule ID | Input columns | Logic or formula | Output column | Business reason |
+|---|---|---|---|---|
+| B-01 | `sales.quantity`, `sales.unit_price` | `total_amount = ROUND_HALF_UP(quantity * unit_price, 2)` using exact decimals, computed after cleaning and type conversion | `sales.total_amount` DECIMAL(12,2) | Revenue per sale line. The source `total_amount` is never accepted; this is the only place it is created. |
+| B-02 | `sales.stock_id` | Lookup (existence check) against `stocks.stock_id` of this batch plus existing `blockflow.db` stock IDs; unmatched rows are rejected by C-08 | none (validation only) | A sale must refer to a real stock item |
+| B-03 | `recorded_by` (all tables) | Lookup against `users.user_id` (read-only); unmatched rows are rejected by C-08 | none (validation only) | Every record must be traceable to a real user |
 
-- It is computed after cleaning and type conversion, so it only uses valid whole-number quantities and 2-decimal prices.
-- The calculation uses exact decimal arithmetic, not floating point, and the result is rounded half up to 2 decimal places.
-- If a source file still contains a `total_amount` column, it was already dropped at extraction and is never compared or reused.
+```text
+total_amount = quantity x unit_price      (rounded half up to 2 decimals)
+```
 
-| Customer | Quantity | `unit_price` | `total_amount` |
-| --- | ---: | ---: | ---: |
-| Juan Dela Cruz | 100 | 12.50 | 1250.00 |
-| Maria Santos | 50 | 16.00 | 800.00 |
-| Pedro Reyes | 30 | 22.00 | 660.00 |
+If a source file still contains a `total_amount` column, it is dropped at extraction, and it is never compared or reused here.
 
-Any further derived field, such as daily totals or profit, would be added to this section before it is built.
+### 5.2 Rules That Do Not Apply (stated explicitly)
+
+| Topic | Decision | Reason |
+|---|---|---|
+| Joins | None. B-02 and B-03 are existence lookups on a unique key list and never add rows or columns. | No table needs to be combined in this stage |
+| Aggregations | None | Output is at record level; daily totals or profit would be added as new B-rules before they are built |
+| Business exclusions (e.g. cancelled records) | None. The source has no status column. Every valid record is kept. | The only exclusions are data-quality rejects (Section 3), each counted and logged |
+| Dimensional modeling, surrogate keys, SCD | Not used. `blockflow.db` is an operational database, so source IDs remain the primary keys and no `dim_`/`fact_` tables are built. | Avoids changing the Stage 1 model; no history tracking is required |
