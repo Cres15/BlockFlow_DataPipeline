@@ -227,4 +227,142 @@ If a source file still contains a `total_amount` column, it is dropped at extrac
 | Joins | None. B-02 and B-03 are existence lookups on a unique key list and never add rows or columns. | No table needs to be combined in this stage |
 | Aggregations | None | Output is at record level; daily totals or profit would be added as new B-rules before they are built |
 | Business exclusions (e.g. cancelled records) | None. The source has no status column. Every valid record is kept. | The only exclusions are data-quality rejects (Section 3), each counted and logged |
-| Dimensional modeling, surrogate keys, SCD | Not used. `blockflow.db` is an operational database, so source IDs remain the primary keys and no `dim_`/`fact_` tables are built. | Avoids changing the Stage 1 model; no history tracking is required |
+| Dimensional modeling, surrogate keys, SCD | Not used. `blockflow.db` is an operational database, so source IDs remain the primary keys and no `dim_`/`fact_` tables arebuilt. | Avoids changing the Stage 1 model; no history tracking is required |
+
+##6. Transformed Data Contract and Naming Convention 
+This section defines the expected structure and naming rules for the transformed output of the BlockFlow ETL pipeline. The raw data comes from daily CSV files containing stock updates, sales transactions, and expense records. During the Transformation Stage, Python and Pandas are used to clean the data, standardize column names and data types, calculate derived values, validate relationships, and prepare the records for loading into the SQLite database.
+The transformed data must follow a consistent schema before it proceeds to the Load Stage. It must also support monthly reporting, sales analysis, expense monitoring, and other business analytics functions of BlockFlow.
+
+##6.1 Required Output Schema
+The transformed output contains three operational tables: stocks, sales, and expenses. These tables contain the business records needed for stock monitoring, sales analysis, and expense reporting. The existing users table is referenced to validate user relationships but is not included in the daily operational extraction.                                                                                                                           	
+
+### 1. Stocks Table
+
+| Column Name | Data Type | Constraint  |
+| ----------- | --------- | ----------- |
+| stock_id    | INTEGER   | Primary Key |
+| size        | TEXT      | NOT NULL    |
+| quantity    | INTEGER   | NOT NULL    |
+| unit        | TEXT      | NOT NULL    |
+| unit_price  | DECIMAL   | NOT NULL    |
+| updated_at  | DATETIME  | NOT NULL    |
+| recorded_by | INTEGER   | Foreign Key |
+
+### 2. Sales Table
+
+| Column Name   | Data Type | Constraint  |
+| ------------- | --------- | ----------- |
+| sales_id      | INTEGER   | Primary Key |
+| stock_id      | INTEGER   | Foreign Key |
+| customer_name | TEXT      | NOT NULL    |
+| phone_number  | TEXT      | NOT NULL    |
+| shop_name     | TEXT      | NOT NULL    |
+| quantity      | INTEGER   | NOT NULL    |
+| unit_price    | DECIMAL   | NOT NULL    |
+| total_amount  | DECIMAL   | DERIVED     |
+| sale_date     | DATETIME  | NOT NULL    |
+| recorded_by   | INTEGER   | Foreign Key |
+
+### 3. Expenses Table
+
+| Column Name  | Data Type | Constraint  |
+| ------------ | --------- | ----------- |
+| expense_id   | INTEGER   | Primary Key |
+| category     | TEXT      | NOT NULL    |
+| description  | TEXT      | NOT NULL    |
+| amount       | DECIMAL   | NOT NULL    |
+| expense_date | DATETIME  | NOT NULL    |
+| recorded_by  | INTEGER   | Foreign Key |
+
+### 6.2 Naming Convention 
+Table and column names use snake_case with complete words and no unclear abbreviations. Table names are lowercase and plural (stocks, sales, expenses, users). No dim_, fact_, or stg_ prefixes appear in the output, because the output is operational tables; staging copies are kept in folders named for the run and batch, not in table names.
+A primary key is the singular table name plus _id: stock_id, sale_id, expense_id. Stage 1 uses the same singular spelling; source files that spell them sales_id or expenses_id are accepted as aliases and renamed by this stage (S-10). A foreign key keeps the name of the key it references (stock_id); the exception is recorded_by, named for its role, which references users.user_id. Date fields use _date for event dates and _at for last-update timestamps. No surrogate keys (_key) are generated.
+
+ 
+### Source-to-Target Mapping 
+This section presents the Source-to-Target Mapping for the Stocks, Sales, and Expenses data. It shows how each column from the daily raw CSV files is mapped and transformed into its corresponding target column. It also identifies the changes in column names, data types, and transformation rules applied to the extracted data. This mapping serves as a guide to ensure that the data is properly standardized, accurate, and consistent before proceeding to the Load Stage 
+
+### Table 1. Stocks Source-to-Target Mapping
+
+| Source Column | Target Column | Source Type | Target Type   | Transformation Applied                                                          |
+| ------------- | ------------- | ----------- | ------------- | ------------------------------------------------------------------------------- |
+| stock_id      | stock_id      | INTEGER     | INTEGER       | Preserve the unique stock identifier for record tracking.                       |
+| size          | size          | VARCHAR     | VARCHAR       | Trim whitespace and standardize hollow block size values (CHB-4, CHB-5, CHB-6). |
+| quantity      | quantity      | INTEGER     | INTEGER       | Validate that the stock quantity is a non-negative whole number.                |
+| unit          | unit          | VARCHAR     | VARCHAR       | Trim whitespace and standardize the unit of measurement (e.g., pcs).            |
+| unit_price    | unit_price    | DECIMAL     | DECIMAL(10,2) | Standardize the monetary value to two decimal places.                           |
+| updated_at    | updated_at    | DATETIME    | DATETIME      | Standardize the date and time format.                                           |
+| recorded_by   | recorded_by   | INTEGER     | INTEGER       | Preserve the user identifier and validate its reference to users.user_id.       |
+
+### Table 2. Sales Source-to-Target Mapping
+
+| Source Column        | Target Column | Source Type      | Target Type   | Transformation Applied                                                    |
+| -------------------- | ------------- | ---------------- | ------------- | ------------------------------------------------------------------------- |
+| sale_id              | sale_id       | INTEGER          | INTEGER       | Preserve the unique sales identifier for record tracking.                 |
+| customer_name        | customer_name | VARCHAR          | VARCHAR       | Trim whitespace and standardize customer name values.                     |
+| phone_number         | phone_number  | VARCHAR          | VARCHAR       | Standardize phone number format while preserving leading zeros.           |
+| shop_name            | shop_name     | VARCHAR          | VARCHAR       | Trim whitespace and standardize shop name values.                         |
+| quantity             | quantity      | INTEGER          | INTEGER       | Validate that the sold quantity is a positive whole number.               |
+| unit_price           | unit_price    | DECIMAL          | DECIMAL(10,2) | Standardize the sale price to two decimal places.                         |
+| quantity, unit_price | total_amount  | INTEGER, DECIMAL | DECIMAL(12,2) | Calculate the total sales amount using quantity × unit_price.             |
+| sale_date            | sale_date     | DATETIME         | DATETIME      | Standardize the sales transaction date and time.                          |
+| recorded_by          | recorded_by   | INTEGER          | INTEGER       | Preserve the user identifier and validate its reference to users.user_id. |
+| stock_id             | stock_id      | INTEGER          | INTEGER       | Preserve and validate the reference to stocks.stock_id.                   |
+
+### Table 3. Expenses Source-to-Target Mapping
+
+| Source Column | Target Column | Source Type | Target Type   | Transformation Applied                                                    |
+| ------------- | ------------- | ----------- | ------------- | ------------------------------------------------------------------------- |
+| expense_id    | expense_id    | INTEGER     | INTEGER       | Preserve the unique expense identifier for record tracking.               |
+| category      | category      | VARCHAR     | VARCHAR       | Trim whitespace and standardize expense categories.                       |
+| description   | description   | TEXT        | TEXT          | Remove unnecessary whitespace and standardize text values.                |
+| amount        | amount        | DECIMAL     | DECIMAL(12,2) | Standardize the expense amount to two decimal places.                     |
+| expense_date  | expense_date  | DATETIME    | DATETIME      | Standardize the expense transaction date and time.                        |
+| recorded_by   | recorded_by   | INTEGER     | INTEGER       | Preserve the user identifier and validate its reference to users.user_id. |
+
+### Schema Consistency        
+Schema Consistency defines how the BlockFlow ETL pipeline detects, handles, and responds to unexpected changes in the input schema—such as altered column names, changed data types, missing required fields, or added columns—before any batch is accepted into the pipeline. This ensures that structural drift in the source CSV files never silently corrupts downstream data.      
+
+
+### 7. Transformation Validation and Data Quality Checks 
+This section defines the checks used to verify that the transformed data is correct, complete, and suitable for loading into blockflow.db. Each check is executed inside the Prefect transformation flow after cleaning, using the validated dataset handed over from the Extraction Stage. Together, the checks verify the integrity, correctness, completeness, and business rule compliance of the transformed output, not source connectivity or extraction completeness, which belong to the Extraction Stage. 
+
+
+| ID   | Check Name                           | Target                           | Purpose                             | Validation Criteria                                                   | Severity     |
+| ---- | ------------------------------------ | -------------------------------- | ----------------------------------- | --------------------------------------------------------------------- | ------------ |
+| V-01 | Handover and dependency readiness    | Extraction metadata, lookups     | Baseline for reconciliation         | Status APPROVED; read count equals extraction count; lookups readable | Critical     |
+| V-02 | Input schema match                   | Input columns                    | Detect source format changes        | All expected columns present                                          | Critical     |
+| V-03 | Output schema and format conformance | Each output table                | Load receives the exact contract    | Types, formats, lengths match Section 6                               | Critical     |
+| V-04 | Required values present              | NOT NULL columns                 | No nulls after transformation       | Null count = 0                                                        | Critical     |
+| V-05 | Primary key uniqueness               | stock_id, sale_id, expense_id    | Prevent duplicate keys              | Duplicate keys = 0                                                    | Critical     |
+| V-06 | Duplicate business records           | Each output table                | Prevent inflated totals             | Duplicate rows = 0                                                    | Critical     |
+| V-07 | Referential integrity                | sales.stock_id, recorded_by      | Prevent orphans                     | 100% of keys have a parent                                            | Critical     |
+| V-08 | Business rules and total accuracy    | Quantities, prices, total_amount | Valid values, correct derived field | Values valid; total_amount = quantity × unit_price (2 dp)             | Critical     |
+| V-09 | Record reconciliation                | Each table                       | Detect lost records                 | read = output + rejected + duplicates                                 | Critical     |
+| V-10 | Aggregate reconciliation             | Quantity and amount sums         | Removals did not change measures    | Sum in = out + rejected + duplicates                                  | Critical     |
+| V-11 | Lookup cardinality                   | B-02, B-03 lookups               | Detect row multiplication           | Row count unchanged by lookups                                        | Critical     |
+| V-12 | Rejected log completeness            | rejected/ files                  | Nothing dropped silently            | Rows in file = rejected + duplicates                                  | Critical     |
+| V-13 | Output not lost                      | Each output table                | Detect a wiped-out table            | Output > 0 when input > 0                                             | Critical     |
+| V-14 | Rejection rate                       | Each table                       | Detect export faults                | Rejected share ≤ 5%                                                   | Non-critical |
+| V-15 | Outlier review                       | Quantity and money columns       | Person confirms unusual values      | Flagged outliers = 0                                                  | Non-critical |
+| V-16 | Unexpected input columns             | Input columns                    | Notice source changes               | No extra columns                                                      | Non-critical |
+
+### 8. Transformation Metadata and Log Specification 
+This section defines the metadata and log records required to monitor, trace, and audit each transformation batch run in the BlockFlow ETL pipeline. For every batch, the pipeline captures run identifiers, batch context, record counts, rules applied, validation results, error diagnostics, execution timing, and code version enabling full observability and reliable recovery from the transformation stage through to loading.
+
+| Field Name            | Purpose                                  | Example Value / Format                   |
+| --------------------- | ---------------------------------------- | ---------------------------------------- |
+| run_id                | Unique ID of the transformation run      | TRF_20261015_0005                        |
+| parent_run_id         | Extraction run this batch came from      | EXT_20261015_0000                        |
+| batch_window          | Date range processed                     | 2026-10-14 to 2026-10-15                 |
+| table_name            | Table transformed                        | sales                                    |
+| start_time / end_time | Transformation timestamps                | 2026-10-15 00:04 / 00:06                 |
+| records_read          | Rows received from extraction            | 120                                      |
+| records_output        | Rows produced                            | 114                                      |
+| records_rejected      | Rows quarantined                         | 6                                        |
+| rules_applied         | Records affected per rule                | C-01: 34; S-01: 120; S-02: 18; B-01: 114 |
+| validation_result     | Outcome of Section 7 checks              | PASS                                     |
+| error_code / message  | Failure details, if any                  | S-01_CONVERSION_FAIL                     |
+| duration              | Total transformation time                | 2m 10s                                   |
+| rules_version         | Version of the transformation code/rules | v1.3                                     |
+
