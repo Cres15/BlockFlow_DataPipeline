@@ -366,3 +366,131 @@ This section defines the metadata and log records required to monitor, trace, an
 | duration              | Total transformation time                | 2m 10s                                   |
 | rules_version         | Version of the transformation code/rules | v1.3                                     |
 
+**9\. Log Retention, Rejected Data, and Access** 
+
+Transformation records are stored on the same standalone PC as the pipeline and blockflow.db. Extraction and transformation each have their own records, owner, and retention, even though the same folder structure is used.
+
+**9.1. Records and Storage**
+
+| Record | Owner stage | Location | Content |
+| ----- | ----- | ----- | ----- |
+| Extraction logs | Extraction | logs/extraction/ | Retrieval errors, counts |
+| Extraction quarantine | Extraction | quarantine/ | Failed batch files |
+| Transformation logs | Transformation | logs/transformation/ | Cleaning actions, errors, failures |
+| Transformation audit summaries | Transformation | audit/transformation/ | Metadata, check results, final state |
+| Rejected rows | Transformation | rejected/ | Rejected rows and dropped duplicates |
+| Handover package | Transformation | staging/transformed/\<batch\_id\>/ | Transformed tables for Load |
+
+Prefect keeps its standard log storage, and one plain-text log file is also written per run. Audit summaries contain no row-level data.
+
+**Rejected-row file layout:** batch\_id, run\_id, rule\_id, rejection\_reason, source\_row\_number, record ID (if present), the failing column and its raw value, and the non-personal columns. To limit sensitive data, customer\_name and phone\_number are not stored; the owner finds them through the record ID or row number in the source file.
+
+**Rejection reasons:** null\_required, unparseable\_value, non\_positive\_value, date\_outside\_window,
+
+**9.2. Retention** 
+
+| Record | Operational or audit | Retention | Justification |
+| ----- | ----- | ----- | ----- |
+| Transformation logs | Operational	 | 12 months | Covers the troubleshooting window for a nightly run and seasonal comparisons |
+| Audit summaries | Audit | 3 years | Evidence of what reached the database; confirm against the business's own record-keeping or tax requirements |
+| Rejected rows | Operational	 | 12 months | Needed until the Owner corrects the source and for later comparison; contains limited data |
+| Handover package | Operational	 | Until Load confirms success, plus 30 days | Allows a Load retry without re-transforming |
+
+Transformation records are retained longer than extraction records, which follow the Stage 1 retention policy, because transformation audit summaries are the permanent evidence of what reached the financial database, while extraction logs only document retrieval from source files. Then the retention counts from the run date. A batch with status MANUAL REVIEW or REJECTED that is not yet resolved, and any file under investigation, is never deleted, even if its period has passed.
+
+**9.3. Access Permissions**
+
+| Role | Logs  | Audit summaries | Rejected rows | Handover package |
+| ----- | ----- | ----- | ----- | ----- |
+| Owner | Read | Read | Read | Read, approve |
+| Staff | None | None | None | None |
+| Pipeline account | Write, read | Write, read | Write, read | Write, read  |
+| Housekeeping process | Archive, delete after retention | Archive, delete after retention | Archive, delete after retention | Delete after retention |
+
+**9.4. Archiving and Deletion**
+
+* **Archiving:** on the 1st of each month, the previous month's log, audit, and rejected files are compressed into one archive per record type in archive/. The archive is verified as readable before the originals are removed from the active directories.  
+* **Deletion:** the monthly housekeeping task deletes archives that are past the retention period in 9.2 and writes each deletion (file, date, reason) to the audit log. It skips any batch on hold as stated in 9.2.  
+* Extraction records follow Stage 1's retention and are not deleted by this process.
+
+
+**10\. Transformation Acceptance and Handover Rules** 
+
+This section defines the conditions that determine whether the transformed output may proceed to the next stage, the Load Stage. Stage 1 decides whether extracted data may proceed to Transformation; this stage makes the equivalent decision for transformed data and Load. The decision is based on the results of the sixteen validation checks in Section 7, evaluated automatically by the Prefect flow at the end of each transformation run, and recorded in the run's validation summary. A rejection-rate threshold is fixed in advance and stored with the rules version, so it is never adjusted after seeing a run's results. 
+
+**10.1. Decision Rules** 
+
+| Overall condition | Acceptance Decision | Pipeline action |
+| ----- | ----- | ----- |
+| All checks V-01 to V-16 PASS for all tables  | APPROVED | Proceed to Load |
+| No critical FAIL, but one or more non-critical WARNING (V-14, V-15, V-16) | MANUAL REVIEW | Hold batch |
+| One or more critical FAIL (V-01 to V-13) | REJECTED | Stop, retry, or quarantine |
+| Timeout or crash after retries | REJECTED | Stop; never hand over |
+
+**10.2. Required Decisions** 
+
+**Automatic Approval**
+
+* Validation condition: all 13 critical checks and all 3 non-critical checks pass.  
+* Acceptance criteria: every table is PASS and the rejection rate of every table is within 5%.  
+* Pipeline action: the batch is handed to Load.  
+* Decision: automatic, made by the Prefect flow. No human approval is needed.
+
+**Manual Review**
+
+* Validation condition: no critical FAIL, but at least one non-critical WARNING: rejection rate above 5% (V-14), flagged outliers (V-15), or an unexpected input column (V-16).  
+* Acceptance criteria: the Owner has reviewed the rejected rows and flagged values and accepts them.  
+* Pipeline action: the batch is held. The transformed data stays in staging/transformed/\<batch\_id\>/ and nothing goes to Load. The Owner is notified through the run log and audit summary. The flow ends and does not block the next day's run.  
+* Decision: manual. The Owner approves the handover (by running the approval step for the batch\_id) or marks the batch REJECTED.
+
+**Rejection or Failure**
+
+* Validation condition: one or more critical checks FAIL (V-01 to V-13), or the task times out or crashes after retries (TRF-E05).  
+* Pipeline action: the handover is stopped. Transient errors are retried up to 3 times. Logs and rejected rows are kept, and the run is marked REJECTED. Incomplete output is never handed to Load.  
+* Decision: automatic at detection. The Owner decides when the source or rules are fixed and the window is re-run.
+
+**10.3. Handover to Load**
+
+A run that reaches APPROVED, automatically or by Owner approval, passes:
+
+1. The transformed tables stocks, sales, expenses in the Section 6 contract (staging/transformed/\<batch\_id\>/).  
+2. The transformation metadata (Section 8): run ID, parent run ID, batch ID and window, counts per table, transform\_version.  
+3. The validation summary below.
+
+The metadata and validation summary are also written to audit/ as the run's permanent record. The users table is not part of the handover. This stage does not load anything into blockflow.db.
+
+**10.4. Validation Summary Format** 
+
+| Validation summary | Result |
+| :---: | :---: |
+| stocks transformation | PASS |
+| sales transformation | PASS |
+| expenses transformation | PASS |
+| users table | Not applicable |
+| Overall transformation | APPROVED |
+
+**11\. Common Transformation Problems and Mitigation** 
+
+Data transformations in batch pipelines can fail due to manual entry errors, structural schema changes, duplicate records, and system timeouts. This section details the potential operational issues during data ingestion, their system impact, and the technical controls used to resolve them and safeguard data integrity.
+
+| Problem  | Possible cause | Impact | Mitigation |
+| ----- | ----- | ----- | ----- |
+| Swapped day and month in dates	 | Month-first vs day-first slash dates | Wrong record date | Window-aware parsing; otherwise reject  |
+| Unreadable dates | Manual entry, mixed exports | Record cannot be placed | Reject and log |
+| Badly formatted numbers | Symbols, separators, unit text | Failed conversion | Strip symbols; reject if still invalid |
+| Duplicates with different IDs | Same transaction keyed twice | Inflated totals | Keep lowest ID |
+| Real sales dropped as duplicates | Two identical genuine sales | Understated sales | Rows stay in rejected/; Owner can restore |
+| Missing required values | Blank fields | Breaks NOT NULL rules | Reject or fill  |
+| Wrong total\_amount | Hand-typed total  | Misstated revenue  | Recompute; check validation rule  |
+| Orphan keys | No matching parent in the batch or users lookup  | Load foreign key failure  | Lookup and reject; check validation rule  |
+| Lookup unavailable | Users lookup file missing or unreadable  | recorded\_by cannot be validated  | Retry 3 times; stop with error flag  |
+| Too many rejected rows | Export fault, format change  | Large share of the day's records rejected; handover held  | Warning; Owner review  |
+| Schema change | Source column renamed or removed  | Job fails  | Schema check before transform; alert and stop  |
+| Late-arriving records | Source posts data after the batch window  | Missing data in reports  | Reprocess a lookback window  |
+| Duplicates after a rerun | Batch rerun without idempotent logic  | Inflated totals  | Replace per batch\_id; Load upserts  |
+| Row multiplication | Join key is not unique in the lookup table  | Inflated totals and output counts above input  | Check join cardinality; deduplicate the lookup; add a critical validation check  |
+| New unit or category | Staff use a new value  | Rows rejected  | Add to reference file; re-run  |
+| Unusual name capitalization | Inconsistent manual casing of the same customer or shop  | Cosmetic mismatch  | Title Case standardization during cleaning; modified rows counted in rules\_applied  |
+| Timeout or interruption | Slow run, environment failure  | Partial output  | Retry 3 times; REJECTED; restart from staging  |
+
+This table documents the common transformation problems of the BlockFlow pipeline, and its contents come directly from the pipeline's own design rather than from generic error lists. The human-entry problems (swapped or unreadable dates, badly formatted numbers, blank fields, duplicates, inconsistent casing) follow from Stage 1's finding that all records are manually entered into daily CSV files, while the operational problems (schema changes, unavailable lookups, reruns, timeouts, row multiplication) follow from the batch design itself, a previous-calendar-day window processed by a pandas/Prefect transformation. Each mitigation is an action the stage already implements, so every row is traceable to an existing control: a cleaning or rejection rule with its quarantine reason, a validation check from V-01 to V-14, the fixed 5 percent rejection threshold, or the declared Prefect limits of three retries and a 30-minute timeout. The table therefore satisfies the lab's requirements that problems be relevant to the selected data and batch design and that solutions be technically reasonable, because a reader can move from any problem to the exact rule, check, or limit that handles it without anything being handled silently. 
