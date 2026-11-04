@@ -6,7 +6,7 @@
    **Name:** BlockFlow: Design and Development of an Integrated Inventory, and Sales Management System for Magalin Hollow Blocks Trading  
    **Purpose:** To monitor and record the daily operation of the business in Magalin Hollow Blocks Trading, including a sales transaction, stocks updates, and operational expenses. The Owner and Staff can record daily and the data is exported as raw CSV into the entry directory, where it serves as the source input for the BlockFlow ETL pipeline which prepares it for output in analytics.  
 2. **Source Database or File**  
-   **Database management system:** SQLite is the pipeline storage like ([blockflow.db](http://blockflow.db)), there is a serverless, and self-contained relational database that stores data in a local file. But, it is not the extraction source, it is the destination where extracted data is loaded into the users, inventory, expenses, and sales tables.  
+   **Database management system:** SQLite is the pipeline storage like ([blockflow.db](http://blockflow.db)), there is a serverless, and self-contained relational database that stores data in a local file. But, it is not the extraction source, it is the destination where extracted data is loaded into the users, stocks, expenses, and sales tables.
    **File format:** The file is CSV for daily raw batch files (stocks updates, sales receipts, and expenses logs) in an entry directory serving as the extraction source.  
 3.  **Extraction Method**  
    **Incremental:** The pipeline performs a daily incremental extraction, pulling only to the most recent days batch files rather than re-extracting the entire dataset in every run.   
@@ -23,7 +23,7 @@
 
 The data extraction process is limited by the availability and quality of the daily raw CSV files. Some source data may contain missing values, duplicate records, or inconsistent date and number formats, which may require cleaning and checking before loading the data into the database. The extraction is also limited to the available operational data, including sales, stocks, and expense records. Some historical records may be incomplete because the business previously relied on manual logs and spreadsheets. The extraction process also depends on the defined database schema and relationships. Changes in field names, data types, or required fields may require adjustments to the extraction and transformation process. External information, such as competitor pricing and market costs, is outside the scope of the extraction.
 
-The extraction process assumes that the required daily raw CSV files are available in the designated folder and that the system has the necessary read and write permissions. It also assumes that the local SQLite database is accessible and that the required tables and relationships are already available. The process also assumes that the extracted data follows the required format and contains valid references for fields such as recorded\_by and stocks\_id. It is also assumed that the extracted data represents the actual operational records of Magalin Hollow Blocks Trading and is processed only for the intended BlockFlow system and reporting purposes. Only authorized business data related to the BlockFlow system is included in the extraction.
+The extraction process assumes that the required daily raw CSV files are available in the designated folder and that the system has the necessary read and write permissions. It also assumes that the local SQLite database is accessible and that the required tables and relationships are already available. The process also assumes that the extracted data follows the required format and contains valid references for fields such as recorded_by and stock_id. It is also assumed that the extracted data represents the actual operational records of Magalin Hollow Blocks Trading and is processed only for the intended BlockFlow system and reporting purposes. Only authorized business data related to the BlockFlow system is included in the extraction.
 
 **2\. Source Tables and Column Specification**
 
@@ -31,23 +31,23 @@ The BlockFlow ETL pipeline includes the operational data needed to process stock
 
 **Name:** Users
 
-**Purpose:** The Users table stores the account information of the Owner/Admin and Staff who access and record data in the BlockFlow system.
+**Purpose:** The Users table stores the account information of the Owner/Admin and Staff who access and record data in the BlockFlow system. It is included only as the reference table for the recorded_by relationship; it is not extracted (see Excluded data in Section 1).
 
-**Important Columns:** The important columns are email (TEXT), password (TEXT), and role (TEXT). The email is used as a unique identifier, while the role identifies the user's system access.
+**Important Columns:** The important columns are email (VARCHAR), which serves as the login identifier, and role (VARCHAR), which identifies the user's system access. The password column is intentionally excluded from this specification because it is a system credential, is never extracted or referenced by the pipeline, and is not relevant to the operational analytics data.
 
-**Primary Key or Unique Identifier:** The email serves as the unique identifier.
+**Primary Key or Unique Identifier:** user_id (INTEGER) is the primary key. Within the Users table itself, email is a unique identifier for login.
 
-**Relevant Relationships:** A user can record multiple sales transactions and expense entries through the recorded\_by field.
+**Relevant Relationships:** A user can record multiple sales transactions and expense entries through the recorded_by field, which references users.user_id.
 
-**Reason for Inclusion:** This table is included because user information and the recorded\_by relationship are needed to identify which authorized user recorded the operational data.
+**Reason for Inclusion:** This table is included only as the referenced table for the recorded_by foreign key in the Stocks, Sales, and Expenses tables, so that every operational record can be traced to the authorized user who recorded it.
 
 **Name:** Stocks
 
 **Purpose:** The Stocks table stores the current stock information of hollow blocks, which is needed for stock monitoring and stock updates.
 
-**Important Columns:** The important columns are size (TEXT), quantity (INTEGER), unit (TEXT), unit\_price (DECIMAL), updated\_at (DATETIME), and recorded\_by (INTEGER).
+**Important Columns:** The important columns are size (VARCHAR), quantity (INTEGER), unit (VARCHAR), unit_price (DECIMAL), updated_at (DATETIME), and recorded_by (INTEGER).
 
-**Primary Key or Unique Identifier:** No explicit primary key is specified.
+**Primary Key or Unique Identifier:** stock_id (INTEGER) is the primary key, a unique, non-null identifier for each stock item.
 
 **Relevant Relationships:** The recorded\_by field is a foreign key that references the Users table. The schema also states that one stock item is referenced across multiple sales orders.
 
@@ -57,9 +57,9 @@ The BlockFlow ETL pipeline includes the operational data needed to process stock
 
 **Purpose:** The Expenses table stores the operational expenses recorded by the business, including expenses related to raw materials, maintenance, and other operating activities.
 
-**Important Columns:** The important columns are category (TEXT), description (TEXT), amount (TEXT), expense\_date (DECIMAL), and recorded\_by (INTEGER).
+**Important Columns:** The important columns are category (VARCHAR), description (VARCHAR), amount (DECIMAL), expense_date (DATETIME), and recorded_by (INTEGER).
 
-**Primary Key or Unique Identifier:** No explicit primary key is specified.
+**Primary Key or Unique Identifier:** expense_id (INTEGER) is the primary key, a unique, non-null identifier for each expense record.
 
 **Relevant Relationships:** The recorded\_by field is a foreign key that references the Users table.
 
@@ -69,11 +69,11 @@ The BlockFlow ETL pipeline includes the operational data needed to process stock
 
 **Purpose:** The Sales table stores the daily sales transactions of Magalin Hollow Blocks Trading.
 
-**Important Columns:** The important columns are customer name (TEXT), phone\_number (TEXT), shop\_name (TEXT), quantity (INTEGER), unit\_price (DECIMAL), total\_amount (DECIMAL), sale\_date (DATETIME), and recorded\_by (INTEGER).
+**Important Columns:** The important columns are stock_id (INTEGER), customer_name (VARCHAR), phone_number (VARCHAR), shop_name (VARCHAR), quantity (INTEGER), unit_price (DECIMAL), total_amount (DECIMAL), sale_date (DATETIME), and recorded_by (INTEGER).
 
-**Primary Key or Unique Identifier:** No explicit primary key is specified. The total\_amount is a derived field calculated from the quantity and unit price.
+**Primary Key or Unique Identifier:** sale_id (INTEGER) is the primary key. The total_amount is a derived field calculated from the quantity and unit price.
 
-**Relevant Relationships:** The recorded\_by field references the Users table, while the Lab 2 schema states that sales transactions reference one stock item through inventory\_id.
+**Relevant Relationships:** The recorded_by field references the Users table, and the stock_id field references the Stocks table, so each sales transaction references one stock item.
 
 **Reason for Inclusion:** This table is included because sales data is the main source for daily sales monitoring, sales analysis, forecasting, profit calculations, and AI-generated reports in BlockFlow 
 
@@ -87,7 +87,7 @@ This stage is to define the checks used to verify that the extracted data is com
 
 **Purpose:** To verify that the source location is reachable before any file operations are attempted. If a directory level has a failure means an environment or configuration problem, and catching it to prevent the misleading file level errors.
 
-**Validation Criteria:** The entry directory exists at the configured path and to the extraction process holds read permission. Then if the check fails if the path does
+**Validation Criteria:** The entry directory exists at the configured path and the extraction process holds read permission on it. The check fails if the path does not exist or is not readable, and the failure is logged before any file-level checks are attempted.
 
 **Check Name:** File Accessibility 
 
@@ -95,7 +95,7 @@ This stage is to define the checks used to verify that the extracted data is com
 
 **Purpose:** To verify that the raw data files required for this extraction window is actually present and readable, since the pipelines declared dependency is the presence of raw log files in the entry directory.
 
-**Validation Criteria:** The all expected files for the extraction window exist, are non-empty, and to prise in their declared format (CSV). The purpose of the check fails if any expected file is missing, empty, or indelible, with the affected filename written to the Prefect log.
+**Validation Criteria:** The all expected files for the extraction window exist, are non-empty, and parse correctly in their declared format (CSV). The check fails if any expected file is missing, empty, or unreadable, with the affected filename written to the Prefect log.
 
 **Check Name:** Columns Exist
 
@@ -103,7 +103,7 @@ This stage is to define the checks used to verify that the extracted data is com
 
 **Purpose:** The schema change in the exported files would silently break downstream loading, so the file structure must match the documented schema before the data is accepted into the pipeline.
 
-**Validation Criteria:** Every required column for the domain is present to Stocks (size, quantity, unit, unit\_price, updated\_at), Sales (customer\_name, phone\_number, shop\_name, quantity, unit\_price, sales\_date), Expenses (category, description, amount, expense\_date). Then the check fails if any required column is missing or renamed.
+**Validation Criteria:** Every required column for the domain is present to Stocks (size, quantity, unit, unit\_price, updated\_at), Sales (stock_id, customer_name, phone_number, shop_name, quantity, unit_price, sale_date), Expenses (category, description, amount, expense\_date). Then the check fails if any required column is missing or renamed.
 
 **Check Name:** Present Identifiers
 
@@ -152,12 +152,12 @@ This stage is to define the checks used to verify that the extracted data is com
 | Pipeline Run ID | Unique identifier for a specific execution instance of the Prefect extraction flow.  | run\_20261011\_000000  |
 | Table or file name  | Identifier of the specific source batch file or domain being processed (stocks updates, sales receipts, expense logs) | sales\_receipts.csv  |
 | Extraction start and end timestamps  | Exact temporal boundaries indicating when the Prefect extraction task began and finished.  | `2026-10-11 00:00:00` to `2026-10-11 00:00:45`   |
-| Extraction status  | Final completion state of the extraction run managed by Prefect (e.g., APPROVED, REJECTED, MANUAL REVIEW). |                 APPROVED |
+| Extraction status  | Final completion state of the extraction run managed by Prefect (e.g., APPROVED, REJECTED, MANUAL REVIEW). |Completed |
 | Number of records read  | Total count of raw rows scanned from the source CSV batch files.  |           150 |
 | Number of records extracted  | Total count of valid records captured into pandas DataFrames for downstream processing. |           150 |
 | Number of records rejected, if applicable  | Count of source records dropped or quarantined due to extraction-level validation failures.  |            0 |
 | Extraction window or data range, if applicable  | Temporal bound identifying the target date for daily incremental extraction (e.g., previous calendar day).  |     2026-10-10 |
-| Validation results  | Outcome summary of the nine extraction-level checks, including source connection, file accessibility, schema matching, and foreign key verification.  |         PASS |
+| Validation results  | Outcome summary of the eight extraction-level checks, including source connection, file accessibility, schema matching, and foreign key verification.  |         PASS |
 | Error message or error code, if applicable  | Detailed diagnostic message or system code captured by Prefect if a task fails or times out.  |                     NONE |
 | Extraction duration | Total elapsed time required to complete the extraction flow under the 30-minute timeout limit.  |                   45 seconds |
 
@@ -174,15 +174,27 @@ This stage is to define the checks used to verify that the extracted data is com
 The extraction flow that produces two kinds of records is operational logs generated by Prefect during each pipeline run  and audit records that document what data is extracted, when, and with what outcome. Because the pipeline processes the business sales and financial data, audit records that carry a longer retention than of operational logs. These are the three:
 
 * **Storage location**  
-- **Operational logs:** That stored locally by Prefect in its standard log storage on the pipeline PC, then have a plain-text copy written to a dedicated logs/directory and organized as one file per run.  
-- **Audit records:** This is to be written to an audit/ directory as one summary file per run, recording the run timestamp, the files extracted, the row counts per domain, the validation check results, and the final task state.  
+ **-Operational logs:** That stored locally by Prefect in its standard log storage on the pipeline PC, then have a plain-text copy written to a dedicated logs/directory and organized as one file per run.  
+ **-Audit records:** This is to be written to an audit/ directory as one summary file per run, recording the run timestamp, the files extracted, the row counts per domain, the validation check results, and the final task state.  
 * **Access permissions**  
-- **Owner:** Both directories reside on the same standalone PC as the pipeline and blockflow.db, consistent with the system's local, self-contained design.  
-- **Staff:** There is no access to logs. The Staff record operational data but do not manage the pipeline, so log access is restricted to prevent accidental modification or deletion of troubleshooting and audit evidence.  
--  The access is enforced by operating-system file permissions on the logs/ and audit/ directories rather than inside the application, matching the standalone PC deployment.  
+ **-Owner:** Both directories reside on the same standalone PC as the pipeline and blockflow.db, consistent with the system's local, self-contained design.  
+**-Staff:** There is no access to logs. The Staff record operational data but do not manage the pipeline, so log access is restricted to prevent accidental modification or deletion of troubleshooting and audit evidence.  
+   -The access is enforced by operating-system file permissions on the logs/ and audit/ directories rather than inside the application, matching the standalone PC deployment.  
 * **Archiving requirements**  
-- At the start of each month, the previous month's log and audit files are compressed into a single archive and the originals are moved out of the active directories. This keeps the active directories small and makes a year of audit history easy to locate.  
-- Audit archives are verified as readable before the originals are removed.
+   -At the start of each month, the previous month's log and audit files are compressed into a single archive and the originals are moved out of the active directories. This keeps the active directories small and makes a year of audit history easy to locate.  
+   -Audit archives are verified as readable before the originals are removed.
+
+* **Retention periods**
+
+  **-Operational logs:** Retained for 12 months. This covers the troubleshooting window for nightly scheduled runs and a full year of seasonal comparison.
+
+  **-Audit records:** Retained for 3 years, because audit records are the permanent evidence of what data was extracted and when, and they must outlast the business's own record-keeping and reporting requirements.
+
+* **Deletion rules**
+
+   -The monthly housekeeping task deletes archives that have passed their retention period and writes each deletion (file, date, reason) to the audit log.
+   -Any batch with a status of MANUAL REVIEW or REJECTED that is not yet resolved, and any file under investigation, is never deleted, even if its retention period has passed.
+
 
 **6\. Extraction Data Contract and Naming Convention**
 
@@ -194,45 +206,49 @@ The data contract defines the exact structure every extracted batch must conform
 
 | Column Name | Data Type | Key/Constraint |
 | ----- | ----- | ----- |
+| user_id | INTEGER | PRIMARY KEY |
 | email | VARCHAR | Unique |
-| password | VARCHAR | NOT NULL |
 | role | VARCHAR | NOT NULL |
 
 **Table 2: Expenses**
 
 | Column Name | Data Type | Key/Constraint |
 | ----- | ----- | ----- |
+| expense_id | INTEGER | PRIMARY KEY |
 | category | VARCHAR | NOT NULL |
-| description | TEXT | NOT NULL |
+| description | VARCHAR | NOT NULL |
 | amount | DECIMAL | NOT NULL |
-| expense\_date | DATETIME | NOT NULL |
-| recorded\_by | INTEGER | FOREIGN KEY |
+| expense_date | DATETIME | NOT NULL |
+| recorded_by | INTEGER | FOREIGN KEY |
 
 **Table 3: Stocks**
 
 | Column Name | Data Type | Key/Constraint |
 | ----- | ----- | ----- |
+| stock_id | INTEGER | PRIMARY KEY |
 | size | VARCHAR | NOT NULL |
 | quantity | INTEGER | NOT NULL |
 | unit | VARCHAR | NOT NULL |
-| unit\_price | DECIMAL | NOT NULL |
-| updated\_at | DATETIME | NOT NULL |
-| recorded\_by | INTEGER | FOREIGN KEY |
+| unit_price | DECIMAL | NOT NULL |
+| updated_at | DATETIME | NOT NULL |
+| recorded_by | INTEGER | FOREIGN KEY |
 
 **Table 4: Sales**
 
 | Column Name | Data Type | Key/Constraint |
 | ----- | ----- | ----- |
-| customer\_name | VARCHAR | NOT NULL |
-| phone\_number | VARCHAR | NOT NULL |
-| shop\_name | VARCHAR | NOT NULL |
+| sale_id | INTEGER | PRIMARY KEY |
+| stock_id | INTEGER | FOREIGN KEY |
+| customer_name | VARCHAR | NOT NULL |
+| phone_number | VARCHAR | NOT NULL |
+| shop_name | VARCHAR | NOT NULL |
 | quantity | INTEGER | NOT NULL |
-| unit\_price | DECIMAL | NOT NULL |
-| total\_amount | DECIMAL | DERIVED |
-| sale\_date | DATETIME | NOT NULL |
-| recorded\_by | INTEGER | FOREIGN KEY |
+| unit_price | DECIMAL | NOT NULL |
+| total_amount | DECIMAL | DERIVED |
+| sale_date | DATETIME | NOT NULL |
+| recorded_by | INTEGER | FOREIGN KEY |
 
-**Required identifiers and constraints.** Every extracted table carries its primary key (expenses\_id, stock\_id, sales\_id) as a unique, non-null identifier. recorded\_by is required and non-null in every record of all three tables, referencing users.user\_id. stock\_id is required and non-null in every Sales record, referencing stocks.stock\_id. total\_amount is a derived field, computed as quantity × unit\_price, and is not accepted from the source file as an input value. 
+**Required identifiers and constraints.** Every extracted table carries its primary key (user_id, expense_id, stock_id, sale_id) as a unique, non-null identifier. recorded\_by is required and non-null in every record of all three tables, referencing users.user\_id. stock\_id is required and non-null in every Sales record, referencing stocks.stock\_id. total\_amount is a derived field, computed as quantity × unit\_price, and is not accepted from the source file as an input value. 
 
 **2\. Naming Convention**
 
@@ -250,35 +266,38 @@ Unexpected changes to column names, data types, or required fields are handled a
 
 | Source Column | Standardized Column | Source Type | Target Type | Mapping Type |
 | :---- | :---- | :---- | :---- | :---- |
-| Customer Name | customer\_name | VARCHAR | VARCHAR | Rename |
-| Phone Number | phone\_number | VARCHAR | VARCHAR | Rename |
-| Shop Name | shop\_name | VARCHAR | VARCHAR | Rename |
+| Size | size | VARCHAR | VARCHAR | Rename |
+| Unit | unit | VARCHAR | VARCHAR | Rename |
 | Quantity | quantity | INTEGER | INTEGER | Rename |
-| Unit Price | unit\_price | DECIMAL | DECIMAL | Rename |
-| Total Amount | total\_amount | DECIMAL | DECIMAL | Derived |
-| Sale Date | sale\_date | DATETIME | DATETIME | Rename |
-| Recorded by | recorded\_by | INTEGER | INTEGER | Rename |
-| Updated At | updated\_at | DATETIME | DATETIME | Rename |
+| Unit Price | unit_price | DECIMAL | DECIMAL | Rename |
+| Updated At | updated_at | DATETIME | DATETIME | Rename |
+| Stock ID | stock_id | INTEGER | INTEGER | Rename |
+| Customer Name | customer_name | VARCHAR | VARCHAR | Rename |
+| Phone Number | phone_number | VARCHAR | VARCHAR | Rename |
+| Shop Name | shop_name | VARCHAR | VARCHAR | Rename |
+| Sale Date | sale_date | DATETIME | DATETIME | Rename |
+| Total Amount | total_amount | DECIMAL | DECIMAL | Derived |
 | Category | category | VARCHAR | VARCHAR | Rename |
-| Description | description | TEXT | TEXT | Rename |
+| Description | description | VARCHAR | VARCHAR | Rename |
 | Amount | amount | DECIMAL | DECIMAL | Rename |
-| Expense Date | expense\_date | DATETIME | DATETIME | Rename |
+| Expense Date | expense_date | DATETIME | DATETIME | Rename |
+| Recorded By | recorded_by | INTEGER | INTEGER | Rename |
 
 **7\. Extraction Acceptance and Handover Rules**
 
-The conditions below determine whether the extracted data may proceed to the Transformation stage. Then the  decision is based on the results of the nine validation checks defined in Section 3, evaluated by the Prefect flow at the end of each extraction run, and recorded in the run's audit summary.
+The conditions below determine whether the extracted data may proceed to the Transformation stage. Then the  decision is based on the results of the eight validation checks defined in Section 3, evaluated by the Prefect flow at the end of each extraction run, and recorded in the run's audit summary.
 
 **Decision Rules**
 
 | Overall Condition  | Acceptance Decision | Pipeline Action |
 | :---: | :---: | :---: |
 | All required tables PASS | APPROVED | Proceed to Transformation |
-| SOne or more non-critical WARNING | MANUAL REVIEW | Hold pipeline |
+| One or more non-critical WARNING | MANUAL REVIEW | Hold pipeline |
 | One or more critical FAIL | REJECTED | Stop/retry/quarantine |
 
 1. **Automatic Approval**  
 * **Validation condition:** When every check returns PASS the source directory is reachable, all three expected batch files present and readable. Also, all required columns exist, recorded\_by and stock\_id non-null in every record, no duplicate records, row counts match the raw files, and all three domains extracted, the tasks completed within the configured 3 retries and the 30-minute execution timeout.  
-* **Acceptance criteria:** All nine checks PASS in the validation summary for the run.  
+* **Acceptance criteria:** All eight checks PASS in the validation summary for the run.  
 * **Pipeline action:** The flow marks that run APPROVED and automatically passes to the extracted DataFrames, run metadata, and validation summary to the Transformation stage.  
 * **Decision mode:** It is automatic, and no human approval required.  
 * **Responsible person:** None, only the Prefect flow decides.
@@ -303,7 +322,7 @@ The conditions below determine whether the extracted data may proceed to the Tra
 4. **Handover**  
 * **Validation condition:** The run has reached APPROVED status (automatically, or via manual review approval).  
 * **Acceptance criteria:**  The extraction output is complete for all three domains and its validation summary contains no unresolved FAIL.  
-* **Pipeline action:** The following is passed to the Transformation stage: (1) the extracted in-memory pandas DataFrames for sales, inventory (stocks), and expenses, (2) run metadata: run timestamp, source filenames and their dates, and row counts per domain, and (3) the validation summary table with the result of each check. These are also written to the audit directory as the run's permanent record.  
+* **Pipeline action:** The following is passed to the Transformation stage: (1) the extracted in-memory pandas DataFrames for sales, stocks, and expenses, (2) run metadata: run timestamp, source filenames and their dates, and row counts per domain, and (3) the validation summary table with the result of each check. These are also written to the audit directory as the run's permanent record.  
 * **Decision mode:** Automatic once approval status is reached.  
 * **Responsible person:** None; the Prefect flow performs the handover and logs it.
 
@@ -334,13 +353,13 @@ The problems below are drawn from the documented design of the BlockFlow pipelin
 * **Problem description:** The batch file arrives with different column names or structures than the documented schema.  
 * **Possible cause:** A change in how the source files are generated or exported that was not reflected in the pipeline metadata.  
 * **Impact on the extraction process:** Downstream processing may fail or map columns incorrectly, corrupting the meaning of the stored data.  
-* **Proposed solution or mitigation:** The pipeline's validation step checks schema and foreign keys (recorded\_by,stocks\_id) before data is accepted. A structural mismatch stops the batch, and the schema documentation is updated in a controlled way before re-running.
+* **Proposed solution or mitigation:** The pipeline's validation step checks schema and foreign keys (recorded_by, stock_id) before data is accepted. A structural mismatch stops the batch, and the schema documentation is updated in a controlled way before re-running.
 
 4. **Erroneous Values from Manual Data Entry**  
 * **Problem description:** The raw records contain human input errors such as misspelled values, inconsistent formats, or blank fields.  
 * **Possible cause:** The source data originates from manual record-keeping, which the study's background identifies as error-prone due to human input.  
 * **Impact on the extraction process:** Passing erroneous values downstream would produce unreliable stock counts, sales totals, and forecasts.  
-* **Proposed solution or mitigation:** The system applies real-time validation and error prompts during data entry so mistakes are corrected before saving. Any errors that still reach the pipeline are handled by the Transform stage's cleaning step (dropping duplicates, filling or removing nulls, standardizing formats), which is deliberately structured into the data pipeline workflow.
+* **Proposed solution or mitigation:** The system applies real-time validation and error prompts during data entry so mistakes are corrected before saving. At extraction, the validation checks detect malformed or missing required values and reject the affected batch, so erroneous records are never accepted into the pipeline; correcting and standardizing such values is the documented responsibility of the Transform stage, not of extraction.
 
 5. **Duplicate Records in the Extracted Data**  
 * **Problem description:** The same transaction appears more than once in the extracted data.  
@@ -349,9 +368,9 @@ The problems below are drawn from the documented design of the BlockFlow pipelin
 * **Proposed solution or mitigation:** The Load stage executes INSERT/UPSERT transactions, so re-processing the same records updates rather than duplicates them, while the Transform stage additionally drops duplicate records.
 
 6. **Records with Missing Foreign Key Values**  
-* **Problem description:** Extracted sales records lack an stocks reference or records lack a recorded\_by user link.  
+* **Problem description:** Extracted sales records lack a stock_id reference, or records lack a recorded_by user link.
 * **Possible cause:** The source entry or export omitted the field despite entry-time validation prompts.  
-* **Impact on the extraction process:** Records without these foreign keys cannot satisfy the relational constraints validated by the pipeline and would break the links to users and inventory items.  
+* **Impact on the extraction process:** Records without these foreign keys cannot satisfy the relational constraints validated by the pipeline and would break the links to users and stock items.  
 * **Proposed solution or mitigation:** The pipeline's validation of schema and foreign keys rejects affected records before loading, ensuring entries are corrected at the source and re-extracted.
 
 7. **Extraction Interruption or Timeout**  
@@ -365,5 +384,3 @@ The problems below are drawn from the documented design of the BlockFlow pipelin
 * **Possible cause:** SQLite is not designed for applications with heavy simultaneous write operations, as documented in the technology trade-offs.  
 * **Impact on the extraction process:** Concurrent writes could slow the Load phase or cause lock contention during insertion.  
 * **Proposed solution or mitigation:** The pipeline configuration limits execution to a maximum of one active run (Max Active Runs: 1), and the daily 12:00 AM schedule processes batches sequentially rather than continuously, minimizing write contention by design.
-
-
