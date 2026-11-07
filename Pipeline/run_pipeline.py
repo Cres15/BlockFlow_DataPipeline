@@ -20,14 +20,26 @@ import argparse
 from datetime import date
 
 from prefect import flow
+from prefect.client.schemas.objects import ConcurrencyLimitConfig, ConcurrencyLimitStrategy
 
-from extract import TIMEOUT_SECONDS, extraction_flow
+from extract import MAX_RETRIES, RETRY_DELAY_SECONDS, TIMEOUT_SECONDS, extraction_flow
 from load import run_load
 from pipeline_audit import FAILURE, PipelineAudit
 from transform import run_transform
 
 
-@flow(name="blockflow-pipeline", timeout_seconds=2 * TIMEOUT_SECONDS)
+# Issue 5 settings
+SCHEDULE_CRON = "0 0 * * *"           # every day at 12:00 AM
+SCHEDULE_TIMEZONE = "Asia/Manila"
+MAX_ACTIVE_RUNS = 1                   # one pipeline run at a time (SQLite single writer)
+PIPELINE_TIMEOUT_SECONDS = TIMEOUT_SECONDS   # 30-minute limit on the whole flow
+# Task-level retries (MAX_RETRIES attempts of retry_delay_seconds each) are set on the tasks:
+#   extract.py   locate_batch_file / extract_domain
+#   transform.py transform_tables
+#   load.py      load_tables (retries when the database is locked/busy)
+
+
+@flow(name="blockflow-pipeline", timeout_seconds=PIPELINE_TIMEOUT_SECONDS)
 def pipeline_flow(target_day: date | None = None, accept_warnings: bool = False) -> dict:
     audit = PipelineAudit(target_day)
     outcome = {"extraction": None, "transform": None, "load": None}
@@ -63,9 +75,13 @@ if __name__ == "__main__":
     if args.serve:
         pipeline_flow.serve(
             name="blockflow-pipeline-daily",
-            cron="0 0 * * *",
-            timezone="Asia/Manila",
-            limit=1,  # Max Active Runs: 1
+            cron=SCHEDULE_CRON,
+            timezone=SCHEDULE_TIMEZONE,
+            limit=MAX_ACTIVE_RUNS,   # at most 1 run executing in this process
+            global_limit=ConcurrencyLimitConfig(      # at most 1 active run of this deployment
+                limit=MAX_ACTIVE_RUNS,
+                collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW,
+            ),
         )
     else:
         outcome = pipeline_flow(args.date, args.accept_warnings)

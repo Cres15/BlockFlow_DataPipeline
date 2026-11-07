@@ -162,7 +162,8 @@ def locate_batch_file(domain: str, day: date) -> Path:
     return path
 
 
-@task(timeout_seconds=TIMEOUT_SECONDS, name="extract-domain")
+@task(retries=MAX_RETRIES, retry_delay_seconds=RETRY_DELAY_SECONDS,
+      timeout_seconds=TIMEOUT_SECONDS, name="extract-domain")
 def extract_domain(domain: str, path: Path, day: date) -> dict:
     """Validate one batch file and read it into a DataFrame."""
     spec = DOMAINS[domain]
