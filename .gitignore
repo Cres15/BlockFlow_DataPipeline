@@ -15,3 +15,6 @@ Pipeline/archive/
 # Python
 __pycache__/
 *.pyc
+Pipeline/staging/
+Pipeline/archive/
+Pipeline/rejected/

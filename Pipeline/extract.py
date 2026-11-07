@@ -384,6 +384,7 @@ def archive_previous_month(today: date | None = None) -> Path | None:
         *LOGS_DIR.glob(f"run_{tag}*"), *AUDIT_DIR.glob(f"run_{tag}*"),
         *LOGS_DIR.glob(f"transform_{tag}*"), *AUDIT_DIR.glob(f"transform_{tag}*"),
         *ROW_REJECTED_DIR.glob(f"transform_{tag}*"),
+        *LOGS_DIR.glob(f"load_{tag}*"), *AUDIT_DIR.glob(f"load_{tag}*"),
     ]
     if not members:
         return None
