@@ -41,6 +41,10 @@ AUDIT_DIR = BASE_DIR / "audit"          # one JSON summary per run
 
 TIMEOUT_SECONDS = 30 * 60               # 30-minute execution timeout
 MAX_RETRIES = 3
+# Logging (shared by every stage): one line format, level set by BLOCKFLOW_LOG_LEVEL
+# (DEBUG, INFO, WARNING or ERROR; default INFO).
+LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+LOG_LEVEL = os.environ.get("BLOCKFLOW_LOG_LEVEL", "INFO").upper()
 RETRY_DELAY_SECONDS = 60
 LOW_COUNT_RATIO = 0.5                   # WARNING if rows < 50% of recent average
 HISTORY_RUNS = 7                        # how many past audits to compare against
@@ -256,8 +260,8 @@ def extraction_flow(target_day: date | None = None) -> dict:
     for d in (LOGS_DIR, AUDIT_DIR):
         d.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(LOGS_DIR / f"{run_id}.log", encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    log.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    log.setLevel(LOG_LEVEL)
     log.addHandler(handler)
     log.info("Starting %s for extraction window %s", run_id, day)
 
@@ -286,6 +290,7 @@ def extraction_flow(target_day: date | None = None) -> dict:
             try:
                 path = locate_batch_file(domain, day)  # retried up to 3x by Prefect
             except Exception as exc:
+                log.error("Batch file for %s on %s not found: %s", domain, day, exc, exc_info=True)
                 checks.append(check("File Accessibility", FAIL,
                                     f"{domain}: batch file not found after {MAX_RETRIES} retries ({exc})",
                                     domain))
@@ -296,6 +301,8 @@ def extraction_flow(target_day: date | None = None) -> dict:
             try:
                 result = extract_domain(domain, path, day)
             except Exception as exc:  # timeout or unexpected error
+                log.error("Extraction of %s failed (file %s, window %s): %s",
+                          domain, path.name, day, exc, exc_info=True)
                 checks.append(check("Extraction Task", FAIL, f"{domain}: {exc}", domain))
                 error_message = f"TASK_FAILED:{domain}"
                 continue
@@ -385,6 +392,7 @@ def archive_previous_month(today: date | None = None) -> Path | None:
         *LOGS_DIR.glob(f"transform_{tag}*"), *AUDIT_DIR.glob(f"transform_{tag}*"),
         *ROW_REJECTED_DIR.glob(f"transform_{tag}*"),
         *LOGS_DIR.glob(f"load_{tag}*"), *AUDIT_DIR.glob(f"load_{tag}*"),
+        *LOGS_DIR.glob(f"pipeline_{tag}*"), *AUDIT_DIR.glob(f"pipeline_{tag}*"),
     ]
     if not members:
         return None

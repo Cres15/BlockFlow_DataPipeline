@@ -32,6 +32,7 @@ import logging
 import os
 import sqlite3
 import time
+import traceback
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -46,6 +47,8 @@ from prefect.cache_policies import NO_CACHE  # noqa: E402
 from extract import (  # noqa: E402
     AUDIT_DIR,
     BASE_DIR,
+    LOG_FORMAT,
+    LOG_LEVEL,
     LOGS_DIR,
     MAX_RETRIES,
     RETRY_DELAY_SECONDS,
@@ -191,6 +194,7 @@ def load_table(con: sqlite3.Connection, table: str, df: pd.DataFrame) -> dict:
     columns = ([pk] if use_pk else []) + cols
     rows = _rows(df, columns)
     before = count_rows(con, table)
+    log.debug("%s: %d row(s) before the load, key columns %s", table, before, columns)
 
     if use_pk:   # UPSERT on the primary key
         updates = ", ".join(f"{c} = excluded.{c}" for c in cols)
@@ -321,13 +325,13 @@ def run_load(transformed: dict) -> dict:
     for directory in (LOGS_DIR, AUDIT_DIR):
         directory.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(LOGS_DIR / f"{run_id}.log", encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    log.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    log.setLevel(LOG_LEVEL)
     log.addHandler(handler)
     log.info("Starting %s (v%s) for %s, transform run %s, database %s", run_id, LOAD_VERSION,
              meta.get("batch_id"), meta.get("run_id"), DB_PATH.name)
 
-    status, error_message = "LOADED", "NONE"
+    status, error_message, error_traceback = "LOADED", "NONE", None
     tables: dict = {}
     attempts = 0
     row_counts: dict = {}
@@ -349,7 +353,9 @@ def run_load(transformed: dict) -> dict:
             attempts = getattr(exc, "attempts", attempts or 1)
             status = "FAILED"
             error_message = f"{type(exc).__name__}: {exc}"
-            log.error("Load failed: %s", error_message)
+            error_traceback = traceback.format_exc()
+            log.error("Load of %s (transform run %s) failed: %s",
+                      meta.get("batch_id"), meta.get("run_id"), error_message, exc_info=True)
 
     finished = datetime.now()
     elapsed = time.monotonic() - t0
@@ -370,6 +376,7 @@ def run_load(transformed: dict) -> dict:
         "row_counts_after_commit": row_counts,
         "verification": "PASS" if status == "LOADED" else "FAIL",
         "error_message": error_message,
+        "error_traceback": error_traceback,
     }
     (AUDIT_DIR / f"{run_id}.json").write_text(json.dumps(audit, indent=2, default=str),
                                               encoding="utf-8")

@@ -46,6 +46,8 @@ from extract import (  # noqa: E402
     AUDIT_DIR,
     BASE_DIR,
     FAIL,
+    LOG_FORMAT,
+    LOG_LEVEL,
     LOGS_DIR,
     MAX_RETRIES,
     PASS,
@@ -610,8 +612,8 @@ def run_transform(extraction: dict, approved_after_review: bool = False,
     for directory in (LOGS_DIR, AUDIT_DIR):
         directory.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(LOGS_DIR / f"{run_id}.log", encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    log.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    log.setLevel(LOG_LEVEL)
     log.addHandler(handler)
     log.info("Starting %s (v%s) for %s, extraction run %s", run_id, TRANSFORM_VERSION,
              batch_id, parent_run_id)
@@ -630,12 +632,15 @@ def run_transform(extraction: dict, approved_after_review: bool = False,
         try:
             outcome = transform_tables(extraction["dataframes"], batch_id)
         except Exception as exc:  # task failed after its retries, or timed out
+            log.error("Transformation of %s (extraction run %s) failed: %s",
+                      batch_id, parent_run_id, exc, exc_info=True)
             checks.append(check("Transformation Task", FAIL, str(exc)))
             error_message = f"TASK_FAILED:{type(exc).__name__}"
         else:
             tables, parents = outcome["tables"], outcome["parents"]
             log.info("Parent lookup source: %s", parents["source"])
             for domain, result in tables.items():
+                log.debug("%s: rules applied %s", domain, result["stats"]["rules_applied"])
                 if result["stats"]["columns_dropped"]:
                     log.info("Dropped columns outside the data contract from %s: %s",
                              domain, result["stats"]["columns_dropped"])
@@ -751,12 +756,25 @@ def load_staged(extraction_run_id: str) -> dict:
 
 @flow(name="blockflow-transform-staged", timeout_seconds=TIMEOUT_SECONDS)
 def transform_staged_flow(extraction_run_id: str, accept_warnings: bool = False) -> dict:
-    """Owner approval path: transform the data of an extraction held for MANUAL REVIEW."""
-    from load import run_load   # imported here: load.py does not depend on this module
-    transformed = run_transform(load_staged(extraction_run_id), approved_after_review=True,
-                                accept_warnings=accept_warnings)
-    if transformed["status"] == "APPROVED":
-        transformed["load"] = run_load(transformed)["status"]
+    """Owner approval path: transform and load the data of an extraction held for MANUAL REVIEW."""
+    from load import run_load             # imported here: neither module imports this one
+    from pipeline_audit import PipelineAudit
+
+    held = load_staged(extraction_run_id)
+    audit = PipelineAudit(trigger="owner_approval", window=held["metadata"].get("extraction_window"))
+    try:
+        audit.record_stage("extraction", held, status="APPROVED (after review)", outcome="ok",
+                           note="held for MANUAL REVIEW, then approved by the Owner")
+        transformed = audit.run_stage("transform", run_transform, held, approved_after_review=True,
+                                      accept_warnings=accept_warnings)
+        if transformed["status"] == "APPROVED":
+            rows = sum(len(df) for df in transformed["dataframes"].values())
+            transformed["load"] = audit.run_stage("load", run_load, transformed, records_in=rows)["status"]
+    except BaseException:
+        audit.finish()
+        raise
+    summary = audit.finish()
+    transformed["pipeline"], transformed["pipeline_run_id"] = summary["status"], summary["run_id"]
     return transformed
 
 
@@ -773,4 +791,5 @@ if __name__ == "__main__":
         outcome = transform_staged_flow(args.staged, args.accept_warnings)
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(f"Cannot approve {args.staged}: {exc}")
-    print(f"Transformation status: {outcome['status']}  |  Load: {outcome.get('load')}")
+    print(f"Pipeline: {outcome['pipeline']}  |  Transformation: {outcome['status']}  |  Load: {outcome.get('load')}")
+    print(f"Audit record: audit/{outcome['pipeline_run_id']}.json")
